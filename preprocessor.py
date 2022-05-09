@@ -243,16 +243,9 @@ class Dataset():
         self.binarize_shards(num_shards, TMP_DIR)
         shutil.rmtree(TMP_DIR)
 
+    def set_batch_size(self, batch_size):
+        self.batch_size = batch_size
 
-    def hash_ngrams(self, unhashed_grams, hash_fn):
-        ngrams = {}
-        for ngram_order in unhashed_grams:
-            ngrams[ngram_order] = {}
-            for gram in unhashed_grams[ngram_order]:
-                ngrams[ngram_order][gram] = (hash_fn(gram), unhashed_grams[ngram_order][gram])
-        if DEBUG:
-            logger.debug(f'Processed example: {ngrams}')
-        return ngrams
 
 
     def binarize_shards(self, num_shards, TMP_DIR):

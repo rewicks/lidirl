@@ -74,6 +74,7 @@ class Trainer():
 
         self.dataset = Dataset(args.data_dir)
         self.dataset.load()
+        self.dataset.set_batch_size(args.batch_size)
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
@@ -123,7 +124,7 @@ class Trainer():
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
             self.optimizer.step()
 
-            if batch_index % 100 == 0:
+            if batch_index % args.log_interval == 0:
                 print(self.results.get_results(self.scheduler.get_last_lr()[0]))
                 self.results.reset(time.time())
 
@@ -141,6 +142,9 @@ def parse_args():
     parser.add_argument("--tb_dir", type=str, default=None)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--embedding_dim", type=int, default=256)
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--min_epochs", type=int, default=25)
+    parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--hidden_dim", type=int, default=256)
 
     args = parser.parse_args()
@@ -149,8 +153,10 @@ def parse_args():
 
 def main(args):
     trainer = Trainer(args)
-    for ep in range(10):
+    for ep in range(args.min_epochs):
+        logger.info(f"Beginning epoch {ep}")
         trainer.run_epoch(args)
+
 
 
 
