@@ -171,6 +171,9 @@ class Dataset():
         self.binarize_shards(num_shards, TMP_DIR)
         shutil.rmtree(TMP_DIR)
 
+    def set_batch_size(self, batch_size):
+        self.batch_size = batch_size
+
     def extract_ngrams(self, text):
         # Currently paying no regard to whitespace
         # Because I think it's imporant when characters start/end words
@@ -282,14 +285,14 @@ def parse_args():
     parser.add_argument('--output_dir', required=True, type=str,
                         help="Output dir to write data files")
     parser.add_argument('--ngram_order', default=3, type=int)
-
+    parser.add_argument('--max_hash_value', default=2048, type=int)
 
     args = parser.parse_args()
     return args
 
 
 def main(args):
-    processed_dataset = Dataset(args.output_dir, args.ngram_order)
+    processed_dataset = Dataset(args.output_dir, args.ngram_order, max_hash_value=args.max_hash_value)
     processed_dataset.process_data(args.input_files)
     processed_dataset.save()
 
