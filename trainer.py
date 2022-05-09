@@ -82,10 +82,12 @@ class Trainer():
             logging.info('Loading pre-existing model from checkpoint')
             self.model = load_model(args.checkpoint_path, map_location=self.device)
         else:
-            self.model = CLD3Model(vocab_size=self.dataset.max_hash_value,
+            self.model = CLD3Model(vocab_size=self.dataset.preprocessor.max_hash_value * len(self.dataset.preprocessor.ngram_orders),
+                                    hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
-                                    label_size=len(self.dataset.labels.keys()),
-                                    max_ngram_order=self.dataset.ngram_order).to(self.device)
+                                    label_size=len(self.dataset.preprocessor.labels.keys()),
+                                    num_ngram_orders=len(self.dataset.preprocessor.ngram_orders)).to(self.device)
+        logger.info(self.model)
 
         self.criterion = nn.NLLLoss()
         self.lr = args.lr
@@ -139,6 +141,7 @@ def parse_args():
     parser.add_argument("--tb_dir", type=str, default=None)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--embedding_dim", type=int, default=256)
+    parser.add_argument("--hidden_dim", type=int, default=256)
 
     args = parser.parse_args()
     return args
@@ -146,7 +149,8 @@ def parse_args():
 
 def main(args):
     trainer = Trainer(args)
-    trainer.run_epoch(args)
+    for ep in range(10):
+        trainer.run_epoch(args)
 
 
 

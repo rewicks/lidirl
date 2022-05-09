@@ -1,5 +1,5 @@
 import logging
-import os
+import os, sys
 import argparse
 import random
 import torch
@@ -8,6 +8,7 @@ import math
 import json
 import sys
 from collections import Counter
+import xxhash
 
 logging.basicConfig(format="%(message)s", level=logging.DEBUG)
 logger = logging.getLogger('gcld3')
@@ -20,6 +21,19 @@ def generate_ngrams(input_text, bytes=False, ngram_order=2):
         for i in range(len(input_text)-ngram_order+1):
             ngrams.append(input_text[i:i+ngram_order])
     return ngrams
+
+class HashXX32(object):
+    def __init__(self, seed, max_hash_value):
+        self.h = xxhash.xxh32(seed=seed)
+        self.max_hash_value = max_hash_value
+
+    def hash(self, o, offset):
+        self.h.reset()
+        self.h.update(o)
+        hash_value = self.h.intdigest() % self.max_hash_value
+        offset *= self.max_hash_value
+        return hash_value + offset
+
 
 class TrainingExample():
     def __init__(self, langid, id, text, hashed_grams, data=None):
@@ -37,11 +51,13 @@ class TrainingExample():
         ngrams = [[] for n in hashed_grams] # an array for each order of ngrams
         weights = [[] for n in hashed_grams] # the weight for averages
 
-        for ngram_order in hashed_grams:
+        for idx, ngram_order in enumerate(hashed_grams):
             for textid in hashed_grams[ngram_order]:
-                hash_id, ngram_weight = hashed_grams[ngram_order][textid]
-                ngrams[ngram_order-1].append(hash_id)
-                weights[ngram_order-1].append(ngram_weight)
+                hash_ids = [h for h, _ in hashed_grams[ngram_order][textid]]
+                ngram_weights = [w for _, w in hashed_grams[ngram_order][textid]]
+                # hash_id, ngram_weight = hashed_grams[ngram_order][textid]
+                ngrams[idx].append(hash_ids)
+                weights[idx].append(ngram_weights)
         return (ngrams, weights)
 
     def size(self):
@@ -77,12 +93,15 @@ class TrainingShard():
 
     def pad_batch(self, batch):
         max_size = 0
+        pad_value_size = 0
         for batch_item in batch.ngrams:
             for order in batch_item[0]:
+                pad_value_size = len(order[0])
                 max_size = max(max_size, len(order))
 
         padded_ngram_idx = []
         padded_ngram_weights = []
+        pad_value = [0 for _ in range(pad_value_size)]
         for batch_item in batch.ngrams:
             padded_item_idx = []
             padded_item_weights = []
@@ -93,9 +112,9 @@ class TrainingShard():
                 padded_order_idx += ids
                 padded_order_weights += weights
                 while len(padded_order_idx) != max_size:
-                    padded_order_idx.append(0)
+                    padded_order_idx.append(pad_value)
                 while len(padded_order_weights) != max_size:
-                    padded_order_weights.append(0)
+                    padded_order_weights.append(pad_value)
                 padded_item_idx.append(padded_order_idx)
                 padded_item_weights.append(padded_order_weights)
             padded_ngram_idx.append(padded_item_idx)
@@ -131,18 +150,71 @@ class TrainingShard():
         self.data = [TrainingExample(d[0], d[1], d[2], d[3], data=d[4]) for d in data]
 
 
+class Preprocessor():
+    def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):
+        self.labels = {"<unk>": 0}
+        self.ngram_orders = ngram_orders
+        self.max_hash_value = max_hash_value
+        self.hashes = []
+        for h in range(num_hashes):
+            self.hashes.append(HashXX32(seed=h, max_hash_value=max_hash_value))
+
+    def extract_ngrams(self, text):
+        # Currently paying no regard to whitespace
+        # Because I think it's imporant when characters start/end words
+        ngrams = {}
+        for ngram_order in self.ngram_orders:
+            ngrams[ngram_order] = {}
+            # counting occurrences of ngrams in text
+            extracted_grams = Counter(generate_ngrams(text, ngram_order=ngram_order))
+            for gram in extracted_grams:
+                # fractional ngram value
+                ngrams[ngram_order][gram] = extracted_grams[gram] / sum(extracted_grams.values())
+        return ngrams
+
+    def hash_ngrams(self, unhashed_grams):
+        ngrams = {}
+        for idx, ngram_order in enumerate(unhashed_grams):
+            ngrams[ngram_order] = {}
+            for gram in unhashed_grams[ngram_order]:
+                ngrams[ngram_order][gram] = []
+                for h in self.hashes:
+                    ngrams[ngram_order][gram].append((h.hash(gram, offset=idx), unhashed_grams[ngram_order][gram]))
+        if DEBUG:
+            logger.debug(f'Processed example: {ngrams}')
+        return ngrams
+
+    def process_example(self, langid, text):
+        ngrams = self.extract_ngrams(text)
+        hashed_ngrams = self.hash_ngrams(ngrams)
+        return self.labels.get(langid, 0), hashed_ngrams
+
+    def add_label(self, langid):
+        if langid not in self.labels:
+            self.labels[langid] = len(self.labels.keys())
+
+    def save_object(self):
+        out = {
+            "labels": self.labels,
+            "ngram_orders": self.ngram_orders,
+            "max_hash_value": self.max_hash_value,
+            "num_hashes": len(self.hashes)
+        }
+        return out
+
+
 
 
 class Dataset():
-    def __init__(self, directory, ngram_order=3, max_shard_size=100000, batch_size=2000, max_hash_value=512):
-        self.ngram_order = ngram_order
+    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=100000, batch_size=2000, max_hash_value=128):
+        self.preprocessor = Preprocessor(ngram_orders=ngram_orders, num_hashes=num_hashes, max_hash_value=max_hash_value)
         self.working_dir = directory
         self.max_shard_size = max_shard_size
-        self.max_ngram_order = ngram_order
         self.max_hash_value = max_hash_value
         self.batch_size = batch_size
         self.labels = {}
         self.shards = []
+
 
     def process_data(self, input_files):
 
@@ -171,22 +243,6 @@ class Dataset():
         self.binarize_shards(num_shards, TMP_DIR)
         shutil.rmtree(TMP_DIR)
 
-    def extract_ngrams(self, text):
-        # Currently paying no regard to whitespace
-        # Because I think it's imporant when characters start/end words
-        ngrams = {}
-        for ngram_order in range(1, self.max_ngram_order+1):
-            ngrams[ngram_order] = {}
-            # counting occurrences of ngrams in text
-            extracted_grams = Counter(generate_ngrams(text, ngram_order=ngram_order))
-            for gram in extracted_grams:
-                # fractional ngram value
-                ngrams[ngram_order][gram] = extracted_grams[gram] / sum(extracted_grams.values())
-        return ngrams
-
-    def default_hash(self, input):
-        hash_value = hash(input)
-        return int(hash_value % self.max_hash_value)
 
     def hash_ngrams(self, unhashed_grams, hash_fn):
         ngrams = {}
@@ -198,12 +254,6 @@ class Dataset():
             logger.debug(f'Processed example: {ngrams}')
         return ngrams
 
-    def process_example(self, langid, text):
-        if langid not in self.labels:
-            self.labels[langid] = len(self.labels.keys())
-        ngrams = self.extract_ngrams(text)
-        hashed_ngrams = self.hash_ngrams(ngrams, self.default_hash)
-        return hashed_ngrams
 
     def binarize_shards(self, num_shards, TMP_DIR):
         for shard_id in range(num_shards+1):
@@ -218,8 +268,9 @@ class Dataset():
                     except:
                         logging.error("Data is malformatted.")
                         sys.exit(-1)
-                    hashed_grams = self.process_example(langid, text)
-                    shard.add_example(langid, self.labels[langid], text, hashed_grams)
+                    self.preprocessor.add_label(langid)
+                    label, hashed_grams = self.preprocessor.process_example(langid, text)
+                    shard.add_example(langid, label, text, hashed_grams)
             shard.shuffle_shard()
             OUTPUT_PATH = os.path.join(self.working_dir, f"shard_{shard_id}.bin")
             torch.save(shard.save_object(), OUTPUT_PATH)
@@ -244,13 +295,11 @@ class Dataset():
 
     def save(self):
         output = {
-            "ngram_order": self.max_ngram_order,
+            "preprocessor": self.preprocessor.save_object(),
             "working_dir": self.working_dir,
             "max_shard_size": self.max_shard_size,
-            "labels": self.labels,
             "shards": self.shards,
             "batch_size": self.batch_size,
-            "max_hash_value": self.max_hash_value
         }
         output_path = os.path.join(self.working_dir, "dataset.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -259,13 +308,15 @@ class Dataset():
     def load(self):
         input_path = os.path.join(self.working_dir, "dataset.json")
         state = json.load(open(input_path))
-        self.max_ngram_order = state["ngram_order"]
+        prepro_state = state["preprocessor"]
+        self.preprocessor = Preprocessor(ngram_orders=prepro_state["ngram_orders"],
+                                            num_hashes=prepro_state["num_hashes"],
+                                            max_hash_value=prepro_state["max_hash_value"])
+        self.preprocessor.labels = prepro_state["labels"]
         self.working_dir = state["working_dir"]
         self.max_shard_size = state["max_shard_size"]
-        self.labels = state["labels"]
         self.shards = state["shards"]
         self.batch_size = state["batch_size"]
-        self.max_hash_value = state["max_hash_value"]
 
 
 
@@ -281,7 +332,9 @@ def parse_args():
     parser.add_argument('--input_files', nargs='*', required=True)
     parser.add_argument('--output_dir', required=True, type=str,
                         help="Output dir to write data files")
-    parser.add_argument('--ngram_order', default=3, type=int)
+    parser.add_argument('--ngram_orders', default="1,2,3", type=str)
+    parser.add_argument('--max_hash_value', default=128, type=int)
+    parser.add_argument('--num_hashes', default=3, type=int)
 
 
     args = parser.parse_args()
@@ -289,7 +342,8 @@ def parse_args():
 
 
 def main(args):
-    processed_dataset = Dataset(args.output_dir, args.ngram_order)
+    ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
+    processed_dataset = Dataset(args.output_dir, ngram_orders=ngram_orders, num_hashes=args.num_hashes, max_hash_value=args.max_hash_value)
     processed_dataset.process_data(args.input_files)
     processed_dataset.save()
 
