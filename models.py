@@ -15,7 +15,6 @@ class CLD3Model(nn.Module):
         self.softmax_layer = nn.Linear(hidden_dim, label_size)
 
     def forward(self, ngrams, ngrams_weights):
-        import pdb; pdb.set_trace()
 
         # NGRAM/WEIGHTS INPUT IS
         # BATCH SIZE X NUM ORDERS X MAX LENGTH X NUM HASHES

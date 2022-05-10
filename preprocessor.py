@@ -15,6 +15,9 @@ logger = logging.getLogger('gcld3')
 
 DEBUG = False
 
+random.seed(14)
+torch.manual_seed(14)
+
 def generate_ngrams(input_text, bytes=False, ngram_order=2):
     ngrams = []
     if not bytes:
@@ -41,7 +44,6 @@ class TrainingExample():
         self.id = id
         self.text = text
         self.hashed_grams = hashed_grams
-        # import pdb; pdb.set_trace()
         if data is None:
             self.data = self.compute(hashed_grams)
         else:
@@ -52,12 +54,13 @@ class TrainingExample():
         weights = [[] for n in hashed_grams] # the weight for averages
 
         for idx, ngram_order in enumerate(hashed_grams):
-            for textid in hashed_grams[ngram_order]:
-                hash_ids = [h for h, _ in hashed_grams[ngram_order][textid]]
-                ngram_weights = [w for _, w in hashed_grams[ngram_order][textid]]
-                # hash_id, ngram_weight = hashed_grams[ngram_order][textid]
-                ngrams[idx].append(hash_ids)
-                weights[idx].append(ngram_weights)
+            if len(hashed_grams[ngram_order]) > 0:
+                for textid in hashed_grams[ngram_order]:
+                    hash_ids = [h for h, _ in hashed_grams[ngram_order][textid]]
+                    ngram_weights = [w for _, w in hashed_grams[ngram_order][textid]]
+                    ngrams[idx].append(hash_ids)
+                    weights[idx].append(ngram_weights)
+
         return (ngrams, weights)
 
     def size(self):
@@ -77,12 +80,13 @@ class Batch():
         self.size = 0
 
     def add(self, example):
-        self.langids.append(example.langid)
-        self.ids.append(example.id)
-        self.texts.append(example.text)
-        self.hashes.append(example.hashed_grams)
-        self.ngrams.append(example.data)
-        self.size += example.size()
+        if len(example.text) > 0:
+            self.langids.append(example.langid)
+            self.ids.append(example.id)
+            self.texts.append(example.text)
+            self.hashes.append(example.hashed_grams)
+            self.ngrams.append(example.data)
+            self.size += example.size()
 
 class TrainingShard():
     def __init__(self):
@@ -93,11 +97,13 @@ class TrainingShard():
 
     def pad_batch(self, batch):
         max_size = 0
+
         pad_value_size = 0
         for batch_item in batch.ngrams:
             for order in batch_item[0]:
-                pad_value_size = len(order[0])
-                max_size = max(max_size, len(order))
+                if len(order) > 0:
+                    pad_value_size = len(order[0])
+                    max_size = max(max_size, len(order))
 
         padded_ngram_idx = []
         padded_ngram_weights = []
@@ -119,9 +125,7 @@ class TrainingShard():
                 padded_item_weights.append(padded_order_weights)
             padded_ngram_idx.append(padded_item_idx)
             padded_ngram_weights.append(padded_item_weights)
-                # padded_ids.append(padded_order)
-            # padded_item.append(padded_ids)
-            # padded_ngrams.append(padded_item)
+
         batch.ngrams = (padded_ngram_idx, padded_ngram_weights)
 
     def shuffle_shard(self):
@@ -133,7 +137,15 @@ class TrainingShard():
             if batch.size + training_example.size() > batch_size:
                 batch.ids = torch.tensor(batch.ids, dtype=torch.long)
                 self.pad_batch(batch)
-                batch.ngrams = (torch.tensor(batch.ngrams[0], dtype=torch.long), torch.tensor(batch.ngrams[1]))
+                try:
+                    batch.ngrams = (torch.tensor(batch.ngrams[0], dtype=torch.long), torch.tensor(batch.ngrams[1]))
+                except:
+                    for i in batch.ngrams[0]:
+                        for j in i:
+                            try:
+                                torch.tensor(j)
+                            except:
+                                import pdb; pdb.set_trace()
                 yield batch.langids, batch.ids, batch.texts, batch.hashes, batch.ngrams
                 batch = Batch()
             batch.add(training_example)
@@ -261,9 +273,10 @@ class Dataset():
                     except:
                         logging.error("Data is malformatted.")
                         sys.exit(-1)
-                    self.preprocessor.add_label(langid)
-                    label, hashed_grams = self.preprocessor.process_example(langid, text)
-                    shard.add_example(langid, label, text, hashed_grams)
+                    if len(text.strip()) > 1:
+                        self.preprocessor.add_label(langid)
+                        label, hashed_grams = self.preprocessor.process_example(langid, text)
+                        shard.add_example(langid, label, text, hashed_grams)
             shard.shuffle_shard()
             OUTPUT_PATH = os.path.join(self.working_dir, f"shard_{shard_id}.bin")
             torch.save(shard.save_object(), OUTPUT_PATH)
