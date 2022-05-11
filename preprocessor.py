@@ -218,7 +218,7 @@ class Preprocessor():
 
 
 class Dataset():
-    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=100000, batch_size=2000, max_hash_value=128):
+    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=50000, batch_size=2000, max_hash_value=128):
         self.preprocessor = Preprocessor(ngram_orders=ngram_orders, num_hashes=num_hashes, max_hash_value=max_hash_value)
         self.working_dir = directory
         self.max_shard_size = max_shard_size

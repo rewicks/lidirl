@@ -31,7 +31,7 @@ class Results():
         self.perplexity += ppl
         self.num_pred += len(predictions)
         preds = predictions ^ labels
-        self.correct_pred = (preds==0).sum().item()
+        self.correct_pred += (preds==0).sum().item()
         self.batches += 1
 
     def get_results(self, lr):
