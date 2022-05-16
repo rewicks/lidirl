@@ -254,6 +254,7 @@ class Dataset():
         for s in shards:
             s.close()
 
+        logging.info("Binarizing Shards...")
         self.binarize_shards(num_shards, TMP_DIR)
         shutil.rmtree(TMP_DIR)
 
@@ -261,9 +262,9 @@ class Dataset():
         self.batch_size = batch_size
 
 
-
     def binarize_shards(self, num_shards, TMP_DIR):
-        for shard_id in range(num_shards+1):
+        for shard_id in range(num_shards):
+            logging.info(f"Processing shard id {shard_id} for {self.type}")
             shard = TrainingShard()
             shard_path = os.path.join(TMP_DIR, f"{self.type}.shard_{shard_id}")
             with open(shard_path) as shard_file:
@@ -345,6 +346,7 @@ def parse_args():
     parser.add_argument('--ngram_orders', default="1,2,3", type=str)
     parser.add_argument('--max_hash_value', default=128, type=int)
     parser.add_argument('--num_hashes', default=3, type=int)
+    parser.add_argument('--max_shard_size', default=100000, type=int)
 
 
     args = parser.parse_args()
@@ -354,12 +356,22 @@ def parse_args():
 def main(args):
     ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
 
-    processed_train_dataset = Dataset(args.output_dir, ngram_orders=ngram_orders, num_hashes=args.num_hashes, max_hash_value=args.max_hash_value, type="train")
+    processed_train_dataset = Dataset(args.output_dir,
+                                        ngram_orders=ngram_orders,
+                                        num_hashes=args.num_hashes,
+                                        max_hash_value=args.max_hash_value,
+                                        max_shard_size=args.max_shard_size,
+                                        type="train")
     processed_train_dataset.process_data(args.train_files)
     processed_train_dataset.save()
 
-    processed_valid_dataset = Dataset(args.output_dir, ngram_orders=ngram_orders, num_hashes=args.num_hashes, max_hash_value=args.max_hash_value, type="valid")
-    processed_valid_dataset.process_data(args.train_files)
+    processed_valid_dataset = Dataset(args.output_dir,
+                                        ngram_orders=ngram_orders,
+                                        num_hashes=args.num_hashes,
+                                        max_hash_value=args.max_hash_value,
+                                        max_shard_size=args.max_shard_size,
+                                        type="valid")
+    processed_valid_dataset.process_data(args.valid_files)
     processed_valid_dataset.save()
 
 

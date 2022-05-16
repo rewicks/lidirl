@@ -8,6 +8,7 @@ import torch.nn.functional as F
 # from torch.utils.tensorboard import SummaryWriter
 import json
 import torchmetrics.classification as tmc
+import metrics
 
 print('here')
 from preprocessor import Dataset
@@ -22,6 +23,7 @@ class Results():
         self.perplexity = 0
         self.accuracy = tmc.Accuracy()
         self.calibration_error = tmc.CalibrationError(n_bins=10)
+        self.brier_score = metrics.BrierScore()
         self.num_pred = 0
         self.update_num = 0
         self.batches = 0
@@ -34,8 +36,8 @@ class Results():
         self.total_loss += loss
         self.perplexity += ppl
         self.accuracy.update(y_hat, labels)
-        self.f1.update(y_hat, labels)
         self.calibration_error.update(y_hat, labels)
+        self.brier_score.update(y_hat, labels)
         self.num_pred += labels.shape[0]
         self.batches += 1
 
@@ -45,6 +47,7 @@ class Results():
         retVal['update_num'] = self.update_num
         retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
         retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
+        retVal['brier_score'] = round(self.brier_score.compute().item(), 4)
         retVal['lr'] = lr
         retVal['total_loss'] = round(self.total_loss, 4)
         retVal['average_loss'] = round(self.total_loss/self.num_pred, 4)
@@ -62,8 +65,8 @@ class Results():
         self.perplexity = 0
         self.num_pred = 0
         self.accuracy.reset()
-        self.f1.reset()
         self.calibration_error.reset()
+        self.brier_score.reset()
         self.update_num += 1
         self.last_update = time
 
@@ -133,10 +136,11 @@ class Trainer():
             inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
             output = self.model(inputs[0], inputs[1])
 
+            probs = torch.exp(output)
             loss = self.criterion(output, ids)
             ppl = torch.exp(F.cross_entropy(output, ids)).item()
 
-            self.results.calculate(loss.item(), ppl, output, ids)
+            self.results.calculate(loss.item(), ppl, probs, ids)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -154,7 +158,7 @@ class Trainer():
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
                         self.best_model = validation_results
-                        save_model(self.model, os.path.join(self.output_dir, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        save_model(self.model, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
                         logging.info(f"Improved accuracy of {validation_results['accuracy']}")
                     else:
                         if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
@@ -178,9 +182,11 @@ class Trainer():
                 inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
                 output = self.model(inputs[0], inputs[1])
 
+                probs = torch.exp(output)
                 loss = self.criterion(output, ids)
                 ppl = torch.exp(F.cross_entropy(output, ids)).item()
-                valid_results.calculate(loss.item(), ppl, output, ids)
+
+                valid_results.calculate(loss.item(), ppl, probs, ids)
 
         self.model.train()
         ret_results = valid_results.get_results(self.scheduler.get_last_lr()[0])
