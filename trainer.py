@@ -34,6 +34,7 @@ class Results():
         self.total_loss += loss
         self.perplexity += ppl
         self.accuracy.update(y_hat, labels)
+        self.f1.update(y_hat, labels)
         self.calibration_error.update(y_hat, labels)
         self.num_pred += labels.shape[0]
         self.batches += 1
@@ -48,9 +49,9 @@ class Results():
         retVal['total_loss'] = round(self.total_loss, 4)
         retVal['average_loss'] = round(self.total_loss/self.num_pred, 4)
         retVal['ppl_per_pred'] = round(self.perplexity/self.num_pred, 4)
-        retVal['time_since_last_update'] = round(time.time()-self.last_update, 2)
-        retVal['predictions_per_second'] = round(self.num_pred/retVal['time_since_last_update'], 2)
-        retVal['time_passed'] = round(time.time()-self.start, 2)
+        retVal['time_since_last_update'] = round(time.time()-self.last_update)
+        retVal['predictions_per_second'] = round(self.num_pred/retVal['time_since_last_update'])
+        retVal['time_passed'] = round(time.time()-self.start)
         retVal['validations'] = self.validations
         retVal['num_pred'] = self.num_pred
         return retVal
@@ -61,6 +62,7 @@ class Results():
         self.perplexity = 0
         self.num_pred = 0
         self.accuracy.reset()
+        self.f1.reset()
         self.calibration_error.reset()
         self.update_num += 1
         self.last_update = time
@@ -85,9 +87,13 @@ class Trainer():
         self.output_path = args.output_path
         self.batch_size = args.batch_size
 
-        self.dataset = Dataset(args.data_dir)
-        self.dataset.load()
-        self.dataset.set_batch_size(args.batch_size)
+        self.train_dataset = Dataset(args.data_dir, type='train')
+        self.train_dataset.load()
+        self.train_dataset.set_batch_size(args.batch_size)
+
+        self.validation_dataset = Dataset(args.data_dir, type='valid')
+        self.validation_dataset.load()
+        self.validation_dataset.set_batch_size(args.batch_size)
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
@@ -96,11 +102,11 @@ class Trainer():
             logging.info('Loading pre-existing model from checkpoint')
             self.model = load_model(args.checkpoint_path, map_location=self.device)
         else:
-            self.model = CLD3Model(vocab_size=self.dataset.preprocessor.max_hash_value * len(self.dataset.preprocessor.ngram_orders),
+            self.model = CLD3Model(vocab_size=self.train_dataset.preprocessor.max_hash_value * len(self.train_dataset.preprocessor.ngram_orders),
                                     hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
-                                    label_size=len(self.dataset.preprocessor.labels.keys()),
-                                    num_ngram_orders=len(self.dataset.preprocessor.ngram_orders)).to(self.device)
+                                    label_size=len(self.train_dataset.preprocessor.labels.keys()),
+                                    num_ngram_orders=len(self.train_dataset.preprocessor.ngram_orders)).to(self.device)
         logger.info(self.model)
 
         self.criterion = nn.NLLLoss()
@@ -121,7 +127,7 @@ class Trainer():
 
     def run_epoch(self, args, epoch=0):
 
-        for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.dataset):
+        for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.train_dataset):
 
             ids = ids.to(self.device)
             inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
@@ -167,7 +173,7 @@ class Trainer():
         self.model.eval()
         valid_results = Results(time.time(), type='VALIDATION')
         with torch.no_grad():
-            for batch_index, (langids, ids, texts, hashes, inputs) in self.dataset.enumerate_valid():
+            for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.validation_dataset):
                 ids = ids.to(self.device)
                 inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
                 output = self.model(inputs[0], inputs[1])
