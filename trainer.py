@@ -18,12 +18,12 @@ logging.basicConfig(format="%(message)s", level=logging.DEBUG)
 logger = logging.getLogger('gcld3')
 
 class Results():
-    def __init__(self, time, type='TRAINING'):
+    def __init__(self, time, device=None, type='TRAINING'):
         self.total_loss = 0
         self.perplexity = 0
-        self.accuracy = tmc.Accuracy()
-        self.calibration_error = tmc.CalibrationError(n_bins=10)
-        self.brier_score = metrics.BrierScore()
+        self.accuracy = tmc.Accuracy().to(device)
+        self.calibration_error = tmc.CalibrationError(n_bins=10).to(device)
+        self.brier_score = metrics.BrierScore().to(device)
         self.num_pred = 0
         self.update_num = 0
         self.batches = 0
@@ -125,7 +125,7 @@ class Trainer():
             self.model = self.model.cuda()
 
         self.best_model = None
-        self.results = Results(time.time())
+        self.results = Results(time.time(), device=self.device)
 
 
     def run_epoch(self, args, epoch=0):
@@ -175,7 +175,7 @@ class Trainer():
 
     def validate(self, args, validation_num=0):
         self.model.eval()
-        valid_results = Results(time.time(), type='VALIDATION')
+        valid_results = Results(time.time(), device=self.device, type='VALIDATION')
         with torch.no_grad():
             for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.validation_dataset):
                 ids = ids.to(self.device)
