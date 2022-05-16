@@ -169,7 +169,7 @@ class Trainer():
                     save_model(self.model, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
             if args.save_every_epoch:
                 save_model(self.model, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
-            return 1
+        return 1
 
 
 
