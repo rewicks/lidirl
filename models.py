@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+import json
 
 class CLD3Model(nn.Module):
     def __init__(self, vocab_size,
@@ -9,7 +10,11 @@ class CLD3Model(nn.Module):
                         label_size,
                         num_ngram_orders):
         super(CLD3Model, self).__init__()
-        num_ngram_orders = num_ngram_orders
+        self.vocab_size = vocab_size
+        self.num_ngram_orders = num_ngram_orders
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+        self.label_size = label_size
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.hidden_layer = nn.Linear(embedding_dim*num_ngram_orders, hidden_dim)
         self.softmax_layer = nn.Linear(hidden_dim, label_size)
@@ -25,3 +30,14 @@ class CLD3Model(nn.Module):
         hidden = self.hidden_layer(embed)
         output = F.log_softmax(self.softmax_layer(hidden), dim=-1)
         return output
+
+    def save_object(self):
+        save = {
+            'weights': self.state_dict(),
+            'vocab_size': self.vocab_size,
+            "num_ngram_orders": self.num_ngram_orders,
+            "embedding_dim": self.embedding_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size
+        }
+        return save

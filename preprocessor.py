@@ -22,7 +22,7 @@ def generate_ngrams(input_text, bytes=False, ngram_order=2):
     ngrams = []
     if not bytes:
         for i in range(len(input_text)-ngram_order+1):
-            ngrams.append(input_text[i:i+ngram_order])
+            ngrams.append(' '.join(input_text[i:i+ngram_order]))
     return ngrams
 
 class HashXX32(object):
@@ -228,26 +228,32 @@ class Dataset():
         self.shards = []
 
 
-    def process_data(self, input_files):
+    def process_data(self, train_files, valid_files):
 
         TMP_DIR = os.path.join(self.working_dir, 'tmp/')
         os.makedirs(TMP_DIR, exist_ok=True)
         # get line numbers for shards
         line_ranges = 0
-        for infile in input_files:
+        for infile in train_files:
             for line in open(infile):
                 line_ranges += 1
 
-        logger.info(f"Found {line_ranges} training examples in {len(input_files)} files.")
+        logger.info(f"Found {line_ranges} training examples in {len(train_files)} files.")
 
         num_shards = line_ranges // self.max_shard_size
         shards = [open(os.path.join(TMP_DIR, f"shard_{n}"), 'w') for n in range(num_shards+1)]
         logger.info(f"Using {num_shards} shards for training due to max shard size of {self.max_shard_size}")
 
-        for infile in input_files:
+        for infile in train_files:
             for line in open(infile):
                 random_shard = random.choice(shards)
                 random_shard.write(line)
+
+        for infile in valid_files:
+            with open(infile) as inf, open(os.path.join(TMP_DIR, f"valid.shard"), 'w') as outfile:
+                for line in inf:
+                    outfile.write(line)
+
 
         for s in shards:
             s.close()
@@ -268,12 +274,12 @@ class Dataset():
                 for example in shard_file:
                     example = example.strip().split('\t')
                     langid = example[0]
-                    try:
-                        text = '\t'.join(example[1:])
-                    except:
-                        logging.error("Data is malformatted.")
-                        sys.exit(-1)
-                    if len(text.strip()) > 1:
+                    if len(example) > 1:
+                        try:
+                            text = example[1].split(' ')
+                        except:
+                            logging.error("Data is malformatted.")
+                            sys.exit(-1)
                         self.preprocessor.add_label(langid)
                         label, hashed_grams = self.preprocessor.process_example(langid, text)
                         shard.add_example(langid, label, text, hashed_grams)
@@ -281,6 +287,23 @@ class Dataset():
             OUTPUT_PATH = os.path.join(self.working_dir, f"shard_{shard_id}.bin")
             torch.save(shard.save_object(), OUTPUT_PATH)
             self.shards.append(OUTPUT_PATH)
+        self.valid_shard = TrainingShard()
+        with open(os.path.join(TMP_DIR, f"valid.shard")) as shard_file:
+            for example in shard_file:
+                example = example.strip().split('\t')
+                langid = example[0]
+                if len(example) > 1:
+                    try:
+                        text = example[1].split(' ')
+                    except:
+                        logging.error("Data is malformatted.")
+                        sys.exit(-1)
+                    label, hashed_grams = self.preprocessor.process_example(langid, text)
+                    self.valid_shard.add_example(langid, label, text, hashed_grams)
+        OUTPUT_PATH = os.path.join(self.working_dir, f"valid_shard.bin")
+        torch.save(self.valid_shard.save_object(), OUTPUT_PATH)
+        self.valid_shard = OUTPUT_PATH
+
 
     def add_user_defined_ids(self, user_defined_ids):
         for id in user_defined_ids:
@@ -299,6 +322,17 @@ class Dataset():
             for langid_batch, id_batch, text_batch, hash_batch, ngram_batch in shard.get_batch(self.batch_size):
                 yield langid_batch, id_batch, text_batch, hash_batch, ngram_batch
 
+    def enumerate_valid(self):
+        try:
+            valid_shard = TrainingShard()
+            valid_shard.load_object(torch.load(self.valid_shard))
+        except Exception as e:
+            print(e)
+            logger.error(f"Couldn't find processed shard at {shard_path}! Reprocess your data")
+            sys.exit(-1)
+        for index, (langid_batch, id_batch, text_batch, hash_batch, ngram_batch) in enumerate(valid_shard.get_batch(self.batch_size)):
+            yield index, (langid_batch, id_batch, text_batch, hash_batch, ngram_batch)
+
     def save(self):
         output = {
             "preprocessor": self.preprocessor.save_object(),
@@ -306,6 +340,7 @@ class Dataset():
             "max_shard_size": self.max_shard_size,
             "shards": self.shards,
             "batch_size": self.batch_size,
+            "valid_shard": self.valid_shard,
         }
         output_path = os.path.join(self.working_dir, "dataset.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -323,6 +358,7 @@ class Dataset():
         self.max_shard_size = state["max_shard_size"]
         self.shards = state["shards"]
         self.batch_size = state["batch_size"]
+        self.valid_shard = state["valid_shard"]
 
 
 
@@ -335,7 +371,8 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter
     )
 
-    parser.add_argument('--input_files', nargs='*', required=True)
+    parser.add_argument('--train_files', nargs='*', required=True)
+    parser.add_argument('--valid_files', nargs='*', required=True)
     parser.add_argument('--output_dir', required=True, type=str,
                         help="Output dir to write data files")
     parser.add_argument('--ngram_orders', default="1,2,3", type=str)
@@ -350,7 +387,7 @@ def parse_args():
 def main(args):
     ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
     processed_dataset = Dataset(args.output_dir, ngram_orders=ngram_orders, num_hashes=args.num_hashes, max_hash_value=args.max_hash_value)
-    processed_dataset.process_data(args.input_files)
+    processed_dataset.process_data(args.train_files, args.valid_files)
     processed_dataset.save()
 
 
