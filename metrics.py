@@ -12,8 +12,11 @@ class BrierScore(torchmetrics.Metric):
     def update(self, preds: torch.Tensor, target: torch.Tensor):
 
         one_hot_target = F.one_hot(target)
-        
-        self.sum_of_squares += torch.sum(torch.pow((preds-one_hot_target), 2))
+       
+        try: 
+            self.sum_of_squares += torch.sum(torch.pow((preds-one_hot_target), 2))
+        except:
+            return -1
         self.total += target.numel()
 
     def compute(self):

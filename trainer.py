@@ -36,7 +36,8 @@ class Results():
         self.total_loss += loss
         self.perplexity += ppl
         self.accuracy.update(y_hat, labels)
-        self.calibration_error.update(y_hat, labels)
+        if self.calibration_error.update(y_hat, labels) == -1:
+            return -1
         self.brier_score.update(y_hat, labels)
         self.num_pred += labels.shape[0]
         self.batches += 1
@@ -140,7 +141,8 @@ class Trainer():
             loss = self.criterion(output, ids)
             ppl = torch.exp(F.cross_entropy(output, ids)).item()
 
-            self.results.calculate(loss.item(), ppl, probs, ids)
+            if self.results.calculate(loss.item(), ppl, probs, ids) == -1:
+                print(batch_index, langids, ids, texts, hashes, inputs)
 
             self.optimizer.zero_grad()
             loss.backward()
