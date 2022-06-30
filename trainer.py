@@ -10,7 +10,6 @@ import json
 import torchmetrics.classification as tmc
 import metrics
 
-print('here')
 from preprocessor import Dataset
 from models import CLD3Model
 

@@ -39,7 +39,7 @@ class HashXX32(object):
 
 
 class TrainingExample():
-    def __init__(self, langid, id, text, hashed_grams, data=None):
+    def __init__(self, langid=None, id=None, text=None, hashed_grams=None, data=None):
         self.langid = langid
         self.id = id
         self.text = text
@@ -66,12 +66,14 @@ class TrainingExample():
     def size(self):
         return sum([len(_) for _ in self.data])
 
-    def save_object(self):
-        return (self.langid, self.id, self.text, self.hashed_grams, self.data)
+    def save_object(self, verbose=True):
+        if verbose:
+            return (self.langid, self.id, self.text, self.hashed_grams, self.data)
+        return (self.id, self.data)
 
 
 class Batch():
-    def __init__(self):
+    def __init__(self, verbose=True):
         self.langids = []
         self.ids = []
         self.texts = []
@@ -80,17 +82,18 @@ class Batch():
         self.size = 0
 
     def add(self, example):
-        if len(example.text) > 0:
+        if example.size() > 0:
             self.langids.append(example.langid)
-            self.ids.append(example.id)
             self.texts.append(example.text)
+            self.ids.append(example.id)
             self.hashes.append(example.hashed_grams)
             self.ngrams.append(example.data)
             self.size += example.size()
 
 class TrainingShard():
-    def __init__(self):
+    def __init__(self, verbose=True):
         self.data = []
+        self.verbose = verbose
 
     def add_example(self, langid, id, text, hashed_grams):
         self.data.append(TrainingExample(langid, id, text, hashed_grams))
@@ -156,10 +159,13 @@ class TrainingShard():
         yield batch.langids, batch.ids, batch.texts, batch.hashes, batch.ngrams
 
     def save_object(self):
-        return [_.save_object() for _ in self.data]
+        return [_.save_object(verbose=self.verbose) for _ in self.data]
 
     def load_object(self, data):
-        self.data = [TrainingExample(d[0], d[1], d[2], d[3], data=d[4]) for d in data]
+        if self.verbose:
+            self.data = [TrainingExample(d[0], d[1], d[2], d[3], data=d[4]) for d in data]
+        else:
+            self.data = [TrainingExample(None, d[0], None, None, data=d[1]) for d in data]
 
 
 class Preprocessor():
@@ -218,7 +224,7 @@ class Preprocessor():
 
 
 class Dataset():
-    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=50000, batch_size=2000, max_hash_value=128, type='train'):
+    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=50000, batch_size=2000, max_hash_value=128, type='train', verbose_data=True):
         self.preprocessor = Preprocessor(ngram_orders=ngram_orders, num_hashes=num_hashes, max_hash_value=max_hash_value)
         self.working_dir = directory
         self.max_shard_size = max_shard_size
@@ -227,6 +233,7 @@ class Dataset():
         self.labels = {}
         self.shards = []
         self.type = type
+        self.verbose_data = verbose_data
 
 
     def process_data(self, train_files):
@@ -265,7 +272,7 @@ class Dataset():
     def binarize_shards(self, num_shards, TMP_DIR):
         for shard_id in range(num_shards):
             logging.info(f"Processing shard id {shard_id} for {self.type}")
-            shard = TrainingShard()
+            shard = TrainingShard(verbose=self.verbose_data)
             shard_path = os.path.join(TMP_DIR, f"{self.type}.shard_{shard_id}")
             with open(shard_path) as shard_file:
                 for example in shard_file:
@@ -294,7 +301,7 @@ class Dataset():
     def __iter__(self):
         for shard_path in self.shards:
             try:
-                shard = TrainingShard()
+                shard = TrainingShard(verbose=self.verbose_data)
                 shard.load_object(torch.load(shard_path))
             except Exception as e:
                 print(e)
@@ -310,6 +317,7 @@ class Dataset():
             "max_shard_size": self.max_shard_size,
             "shards": self.shards,
             "batch_size": self.batch_size,
+            "verbose": self.verbose_data
         }
         output_path = os.path.join(self.working_dir, f"{self.type}.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -327,6 +335,7 @@ class Dataset():
         self.max_shard_size = state["max_shard_size"]
         self.shards = state["shards"]
         self.batch_size = state["batch_size"]
+        self.verbose_data = state["verbose"]
 
 
 
@@ -347,6 +356,7 @@ def parse_args():
     parser.add_argument('--max_hash_value', default=128, type=int)
     parser.add_argument('--num_hashes', default=3, type=int)
     parser.add_argument('--max_shard_size', default=200000, type=int)
+    parser.add_argument('--verbose_data', default=False, action="store_true")
 
 
     args = parser.parse_args()
@@ -361,7 +371,8 @@ def main(args):
                                         num_hashes=args.num_hashes,
                                         max_hash_value=args.max_hash_value,
                                         max_shard_size=args.max_shard_size,
-                                        type="train")
+                                        type="train",
+                                        verbose_data=args.verbose_data)
     processed_train_dataset.process_data(args.train_files)
     processed_train_dataset.save()
 
@@ -370,7 +381,8 @@ def main(args):
                                         num_hashes=args.num_hashes,
                                         max_hash_value=args.max_hash_value,
                                         max_shard_size=args.max_shard_size,
-                                        type="valid")
+                                        type="valid",
+                                        verbose_data=args.verbose_data)
     processed_valid_dataset.process_data(args.valid_files)
     processed_valid_dataset.save()
 
