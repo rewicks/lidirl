@@ -54,10 +54,10 @@ class TrainingExample():
         weights = [[] for n in hashed_grams] # the weight for averages
 
         for idx, ngram_order in enumerate(hashed_grams):
-            if len(hashed_grams[ngram_order]) > 0:
-                for textid in hashed_grams[ngram_order]:
-                    hash_ids = [h for h, _ in hashed_grams[ngram_order][textid]]
-                    ngram_weights = [w for _, w in hashed_grams[ngram_order][textid]]
+            if len(hashed_grams[idx]) > 0:
+                for t_idx, textid in enumerate(hashed_grams[idx]):
+                    hash_ids = [h for h, _ in hashed_grams[idx][t_idx]]
+                    ngram_weights = [w for _, w in hashed_grams[idx][t_idx]]
                     ngrams[idx].append(hash_ids)
                     weights[idx].append(ngram_weights)
 
@@ -185,13 +185,13 @@ class Preprocessor():
         return ngrams
 
     def hash_ngrams(self, unhashed_grams):
-        ngrams = {}
+        ngrams = []
         for idx, ngram_order in enumerate(unhashed_grams):
-            ngrams[ngram_order] = {}
+            ngrams.append([])
             for gram in unhashed_grams[ngram_order]:
-                ngrams[ngram_order][gram] = []
+                ngrams[-1].append([])
                 for h in self.hashes:
-                    ngrams[ngram_order][gram].append((h.hash(gram, offset=idx), unhashed_grams[ngram_order][gram]))
+                    ngrams[-1][-1].append((h.hash(gram, offset=idx), unhashed_grams[ngram_order][gram]))
         if DEBUG:
             logger.debug(f'Processed example: {ngrams}')
         return ngrams
@@ -346,7 +346,7 @@ def parse_args():
     parser.add_argument('--ngram_orders', default="1,2,3", type=str)
     parser.add_argument('--max_hash_value', default=128, type=int)
     parser.add_argument('--num_hashes', default=3, type=int)
-    parser.add_argument('--max_shard_size', default=100000, type=int)
+    parser.add_argument('--max_shard_size', default=200000, type=int)
 
 
     args = parser.parse_args()
