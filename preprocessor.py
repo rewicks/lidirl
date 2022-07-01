@@ -220,6 +220,9 @@ class Preprocessor():
         }
         return out
 
+    def set_labels(self, labels):
+        self.labels = labels
+
 
 
 
@@ -383,6 +386,7 @@ def main(args):
                                         max_shard_size=args.max_shard_size,
                                         type="valid",
                                         verbose_data=args.verbose_data)
+    processed_valid_dataset.preprocessor.set_labels(processed_train_dataset.preprocessor.labels)
     processed_valid_dataset.process_data(args.valid_files)
     processed_valid_dataset.save()
 
