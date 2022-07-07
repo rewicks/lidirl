@@ -74,9 +74,10 @@ class Results():
         self.validations += 1
 
 
-def save_model(model, output_path, device=None, log_output=None):
+def save_model(model, dataset, output_path, device=None, log_output=None):
     model = model.cpu()
     model_dict = model.save_object()
+    model_dict['preprocessor'] = dataset.preprocessor.save_object()
     torch.save(model_dict, output_path)
     model = model.to(device)
     logging.info(f"SAVING MODEL: {json.dumps(log_output)}")
@@ -159,7 +160,7 @@ class Trainer():
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
                         self.best_model = validation_results
-                        save_model(self.model, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        save_model(self.model, self.train_dataset, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
                         logging.info(f"Improved accuracy of {validation_results['accuracy']}")
                     else:
                         if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
@@ -167,9 +168,9 @@ class Trainer():
                             return 0
                 else:
                     self.best_model = validation_results
-                    save_model(self.model, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                    save_model(self.model, self.train_dataset, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
             if args.save_every_epoch:
-                save_model(self.model, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
+                save_model(self.model, self.train_dataset, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
         return 1
 
 

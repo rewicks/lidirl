@@ -211,6 +211,11 @@ class Preprocessor():
         if langid not in self.labels:
             self.labels[langid] = len(self.labels.keys())
 
+    def set_itos(self):
+        self.itos = ["" for l in self.labels]
+        for label in self.labels:
+            self.itos[self.labels[label]] = label
+
     def save_object(self):
         out = {
             "labels": self.labels,
