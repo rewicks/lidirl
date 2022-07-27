@@ -10,7 +10,7 @@ import torchmetrics.classification as tmc
 import metrics
 
 from preprocessor import Dataset, Processor, NGramProcessor
-from models import CLD3Model
+from models import CLD3Model, TransformerModel
 
 ######################################################################################
 
@@ -229,7 +229,11 @@ def build_model(args, dataset):
                                     label_size=len(dataset.labels.keys()),
                                     num_ngram_orders=len(ngram_orders))
     elif args.model == "transformer":
-        pass
+        model = TransformerModel(vocab_size=len(dataset.vocab),
+                                    embedding_dim=args.embedding_dim,
+                                    label_size=len(dataset.labels.keys()),
+                                    num_layers=args.num_layers,
+                                    max_len=args.max_length)
 
     return model
 
@@ -271,6 +275,8 @@ def parse_args():
     parser.add_argument('--validation_interval', type=int, default=25000)
     parser.add_argument("--validation_threshold", type=int, default=10)
 
+    parser.add_argument("--num-layers", default=3, type=int) # need to add this to linear
+
     subparsers = parser.add_subparsers(help="Determines the type of model to be built and trained", dest="model")
     
     linear_parser = subparsers.add_parser("linear-ngram", help="a linear ngram style model")
@@ -279,6 +285,7 @@ def parse_args():
     linear_parser.add_argument("--num_hashes", default=1, type=int)
 
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
+    transformer_parser.add_argument("--max-length", default=1024, type=int)
 
     args = parser.parse_args()
 

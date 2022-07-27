@@ -138,10 +138,22 @@ class Processor():
         return self.pad_batch(text, device)
 
     def pad_batch(self, batch, device, max_size=None):
-        return torch.tensor(batch).to(device)
+        max_size = 0
+        for item in batch:
+            max_size = max(max_size, len(item))
+        
+        new_batch = []
+        for item in batch:
+            new_batch.append(item)
+            while len(new_batch[-1]) < max_size:
+                new_batch[-1].append(0)
+        return torch.tensor(new_batch).to(device)
 
     def __call__(self, text, device):
         return self.process_example(text, device)
+
+    def save_object(self):
+        return {}
 
 class NGramProcessor(Processor):
     def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):

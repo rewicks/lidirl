@@ -1,7 +1,8 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-import json
+# import json
+import math
 
 class CLD3Model(nn.Module):
     def __init__(self, vocab_size,
@@ -44,3 +45,68 @@ class CLD3Model(nn.Module):
             "label_size": self.label_size
         }
         return save
+
+class TransformerModel(nn.Module):
+    def __init__(self,
+                    vocab_size,
+                    embedding_dim,
+                    label_size,
+                    num_layers,
+                    max_len,
+                    nhead=8
+                    ):
+        super(TransformerModel, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.pos_embed = PositionalEncoding(embed_size=embedding_dim, max_len=max_len)
+        self.embed = nn.Embedding(vocab_size, embedding_dim)
+        self.proj = nn.Linear(embedding_dim, label_size)
+
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_dim
+        self.label_size = label_size
+        self.num_layers = num_layers
+        self.max_length = max_len
+        self.nhead = nhead
+
+    def forward(self, inputs): # need to do padding mask
+        inputs = inputs[:, :self.max_length]
+        pad_mask = self.get_padding_mask(inputs)
+        inputs = inputs.t()
+        embed = self.embed(inputs)
+        pos_embed = self.pos_embed(embed)
+        encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
+        output = self.proj(encoding)
+        return F.log_softmax(output, dim=-1)
+
+    def get_padding_mask(self, inputs):
+        return torch.eq(inputs, 0)
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embedding_size": self.embedding_size,
+            "label_size": self.label_size,
+            "num_layers": self.num_layers,
+            "max_length": self.max_length,
+            "nhead": self.nhead
+        }
+        return save
+
+class PositionalEncoding(nn.Module):
+    
+    def __init__(self, embed_size=512, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+        pe = torch.zeros(max_len, embed_size)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_size, 2).float() * (-math.log(10000.0) / embed_size))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0,1)
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
