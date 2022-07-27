@@ -40,6 +40,7 @@ def load_preprocessor(model, preprocessor_path=None):
                                     max_hash_value=prepro_dict['max_hash_value']
                                     )
     preprocessor.set_labels(prepro_dict['labels'])
+    preprocessor.set_itos()
     return preprocessor
 
 
@@ -50,7 +51,6 @@ class EvalModel():
     def __init__(self, model_path, args):
         self.model = load_model(model_path)
         self.preprocessor = load_preprocessor(self.model, preprocessor_path=args.preprocessor_path)
-        self.preprocessor.set_itos()
         self.args = args
 
 
@@ -88,7 +88,7 @@ class EvalModel():
         data = TrainingShard()
         langid = '<unk>'
         for line in input_file:
-            label, hashed_grams = self.preprocessor.process_example(langid, line.strip())
+            label, hashed_grams = self.preprocessor.process_example(langid, line.strip().split())
             data.add_example(langid, label, line.strip(), hashed_grams)
         return data
 

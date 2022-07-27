@@ -209,7 +209,7 @@ class NGramProcessor(Processor):
         
 
 
-        out = (torch.tensor(batch_padded_ngrams).to(device), torch.tensor(batch_padded_weights).to(device))
+        out = (torch.tensor(batch_padded_ngrams, dtype=torch.long).to(device), torch.tensor(batch_padded_weights).to(device))
         return out
 
 
