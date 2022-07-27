@@ -10,19 +10,28 @@ import sys
 from collections import Counter
 import xxhash
 
-logging.basicConfig(format="%(message)s", level=logging.DEBUG)
-logger = logging.getLogger('gcld3')
+######################################################################################
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=os.environ.get("LOGLEVEL", "INFO").upper(),
+    stream=sys.stderr,
+)
+logger = logging.getLogger("langid")
+
+######################################################################################
 
 DEBUG = False
 
 random.seed(14)
 torch.manual_seed(14)
 
-def generate_ngrams(input_text, bytes=False, ngram_order=2):
+def generate_ngrams(input_text, ngram_order=2):
     ngrams = []
-    if not bytes:
-        for i in range(len(input_text)-ngram_order+1):
-            ngrams.append(' '.join(input_text[i:i+ngram_order]))
+    for i in range(len(input_text)-ngram_order+1):
+        gram = ' '.join([str(_) for _ in input_text[i:i+ngram_order]])
+        ngrams.append(gram)
     return ngrams
 
 class HashXX32(object):
@@ -39,64 +48,35 @@ class HashXX32(object):
 
 
 class TrainingExample():
-    def __init__(self, langid=None, id=None, text=None, hashed_grams=None, data=None):
-        self.langid = langid
-        self.id = id
+    def __init__(self, label=None, text=None):
+        self.label = label
         self.text = text
-        self.hashed_grams = hashed_grams
-        if data is None:
-            self.data = self.compute(hashed_grams)
-        else:
-            self.data = data
-
-    def compute(self, hashed_grams):
-        ngrams = [[] for n in hashed_grams] # an array for each order of ngrams
-        weights = [[] for n in hashed_grams] # the weight for averages
-
-        for idx, ngram_order in enumerate(hashed_grams):
-            if len(hashed_grams[idx]) > 0:
-                for t_idx, textid in enumerate(hashed_grams[idx]):
-                    hash_ids = [h for h, _ in hashed_grams[idx][t_idx]]
-                    ngram_weights = [w for _, w in hashed_grams[idx][t_idx]]
-                    ngrams[idx].append(hash_ids)
-                    weights[idx].append(ngram_weights)
-
-        return (ngrams, weights)
 
     def size(self):
-        return sum([len(_) for _ in self.data])
+        return len(self.text)
 
-    def save_object(self, verbose=True):
-        if verbose:
-            return (self.langid, self.id, self.text, self.hashed_grams, self.data)
-        return (self.id, self.data)
+    def save_object(self):
+        return (self.label, self.text)
 
 
 class Batch():
-    def __init__(self, verbose=True):
-        self.langids = []
-        self.ids = []
+    def __init__(self):
+        self.labels = []
         self.texts = []
-        self.hashes = []
-        self.ngrams = []
         self.size = 0
 
     def add(self, example):
         if example.size() > 0:
-            self.langids.append(example.langid)
+            self.labels.append(example.label)
             self.texts.append(example.text)
-            self.ids.append(example.id)
-            self.hashes.append(example.hashed_grams)
-            self.ngrams.append(example.data)
             self.size += example.size()
 
 class TrainingShard():
-    def __init__(self, verbose=True):
+    def __init__(self):
         self.data = []
-        self.verbose = verbose
 
-    def add_example(self, langid, id, text, hashed_grams):
-        self.data.append(TrainingExample(langid, id, text, hashed_grams))
+    def add_example(self, label, text):
+        self.data.append(TrainingExample(label, text))
 
     def pad_batch(self, batch):
         max_size = 0
@@ -137,45 +117,101 @@ class TrainingShard():
     def get_batch(self, batch_size=2000):
         batch = Batch()
         for training_example in self.data:
-            if batch.size + training_example.size() > batch_size:
-                batch.ids = torch.tensor(batch.ids, dtype=torch.long)
-                self.pad_batch(batch)
-                try:
-                    batch.ngrams = (torch.tensor(batch.ngrams[0], dtype=torch.long), torch.tensor(batch.ngrams[1]))
-                except:
-                    for i in batch.ngrams[0]:
-                        for j in i:
-                            try:
-                                torch.tensor(j)
-                            except:
-                                import pdb; pdb.set_trace()
-                yield batch.langids, batch.ids, batch.texts, batch.hashes, batch.ngrams
+            if batch.size + training_example.size() > batch_size: 
+                yield batch.labels, batch.texts
                 batch = Batch()
             batch.add(training_example)
-        batch.ids = torch.tensor(batch.ids, dtype=torch.long)
-        # BATCH SIZE X 2 X MAX ORDER X SEQ LENGTH
-        self.pad_batch(batch)
-        batch.ngrams = (torch.tensor(batch.ngrams[0], dtype=torch.long), torch.tensor(batch.ngrams[1]))
-        yield batch.langids, batch.ids, batch.texts, batch.hashes, batch.ngrams
+
+        yield batch.labels, batch.texts
 
     def save_object(self):
-        return [_.save_object(verbose=self.verbose) for _ in self.data]
+        return [_.save_object() for _ in self.data]
 
     def load_object(self, data):
-        if self.verbose:
-            self.data = [TrainingExample(d[0], d[1], d[2], d[3], data=d[4]) for d in data]
-        else:
-            self.data = [TrainingExample(None, d[0], None, None, data=d[1]) for d in data]
+        self.data = [TrainingExample(d[0], d[1]) for d in data]
 
+class Processor():
+    def __init__(self):
+        pass
 
-class Preprocessor():
+    def process_example(self, text, device):
+        return self.pad_batch(text, device)
+
+    def pad_batch(self, batch, device, max_size=None):
+        return torch.tensor(batch).to(device)
+
+    def __call__(self, text, device):
+        return self.process_example(text, device)
+
+class NGramProcessor(Processor):
     def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):
-        self.labels = {"<unk>": 0}
         self.ngram_orders = ngram_orders
         self.max_hash_value = max_hash_value
         self.hashes = []
         for h in range(num_hashes):
             self.hashes.append(HashXX32(seed=h, max_hash_value=max_hash_value))
+
+    def process_example(self, langid, text):
+        ngrams = self.extract_ngrams(text)
+        hashed_ngrams = self.hash_ngrams(ngrams)
+        return self.labels.get(langid, 0), hashed_ngrams
+
+    def process_example(self, text, device):
+        batched_ngrams = []
+        batched_weights = []
+        max_size = 0
+        for instance in text:
+
+            ngrams = self.extract_ngrams(instance)
+            hashed_ngrams = self.hash_ngrams(ngrams)
+
+            ngrams = [[] for n in hashed_ngrams]
+            weights = [[] for n in hashed_ngrams]
+
+            for idx, ngram_order in enumerate(hashed_ngrams):
+                for tok_idx, _ in enumerate(ngram_order):
+                    hash_ids = [h for h, _ in hashed_ngrams[idx][tok_idx]]
+                    ngram_weights = [w for _, w in hashed_ngrams[idx][tok_idx]]
+                    ngrams[idx].append(hash_ids)
+                    weights[idx].append(ngram_weights)
+                max_size = max(max_size, len(ngrams[-1]))
+
+            batched_ngrams.append(ngrams)
+            batched_weights.append(weights)
+
+        return self.pad_batch((batched_ngrams, batched_weights), device, max_size)
+
+    def pad_batch(self, batch, device, max_size=None):
+
+        batch_padded_ngrams = []
+        batch_padded_weights = []
+        pad_value = [0 for _ in range(len(self.hashes))]
+
+        for ngrams, weights in zip(batch[0], batch[1]):
+            padded_ngrams = []
+            padded_weights = []
+            for ngram_order, weight_order in zip(ngrams, weights):
+                padded_ngram_order = []
+                padded_weight_order = []
+
+                padded_ngram_order += ngram_order
+                padded_weight_order += weight_order
+                while len(padded_ngram_order) != max_size:
+                    padded_ngram_order.append(pad_value)
+                while len(padded_weight_order) != max_size:
+                    padded_weight_order.append(pad_value)
+            
+                padded_ngrams.append(padded_ngram_order)
+                padded_weights.append(padded_weight_order)
+            
+            batch_padded_ngrams.append(padded_ngrams)
+            batch_padded_weights.append(padded_weights)
+        
+
+
+        out = (torch.tensor(batch_padded_ngrams).to(device), torch.tensor(batch_padded_weights).to(device))
+        return out
+
 
     def extract_ngrams(self, text):
         # Currently paying no regard to whitespace
@@ -202,11 +238,6 @@ class Preprocessor():
             logger.debug(f'Processed example: {ngrams}')
         return ngrams
 
-    def process_example(self, langid, text):
-        ngrams = self.extract_ngrams(text)
-        hashed_ngrams = self.hash_ngrams(ngrams)
-        return self.labels.get(langid, 0), hashed_ngrams
-
     def add_label(self, langid):
         if langid not in self.labels:
             self.labels[langid] = len(self.labels.keys())
@@ -218,37 +249,40 @@ class Preprocessor():
 
     def save_object(self):
         out = {
-            "labels": self.labels,
             "ngram_orders": self.ngram_orders,
             "max_hash_value": self.max_hash_value,
             "num_hashes": len(self.hashes)
         }
         return out
 
-    def set_labels(self, labels):
-        self.labels = labels
-
-
-
 
 class Dataset():
-    def __init__(self, directory, ngram_orders=[1,2,3], num_hashes=3, max_shard_size=50000, batch_size=2000, max_hash_value=128, type='train', verbose_data=True):
-        self.preprocessor = Preprocessor(ngram_orders=ngram_orders, num_hashes=num_hashes, max_hash_value=max_hash_value)
+    def __init__(self, directory, bytes=False, max_shard_size=50000, batch_size=2000, type='train', vocab=None):
         self.working_dir = directory
         self.max_shard_size = max_shard_size
-        self.max_hash_value = max_hash_value
         self.batch_size = batch_size
-        self.labels = {}
+        self.labels = {
+            "<unk>": 0
+        }
+        if vocab is None:
+            self.vocab = {
+                "<unk>": 0
+            }
+            self.locked_vocab = False
+        else:
+            self.vocab = vocab
+            self.locked_vocab = True
         self.shards = []
         self.type = type
-        self.verbose_data = verbose_data
-
+        self.bytes = bytes
 
     def process_data(self, train_files):
 
         TMP_DIR = os.path.join(self.working_dir, 'tmp/')
+        logging.info(f"Making temp directory at {TMP_DIR}")
         os.makedirs(TMP_DIR, exist_ok=True)
-        # get line numbers for shards
+
+        # get line numbers for shards; randomly shuffle after
         line_ranges = 0
         for infile in train_files:
             for line in open(infile):
@@ -256,76 +290,94 @@ class Dataset():
 
         logger.info(f"Found {line_ranges} {self.type} examples in {len(train_files)} files.")
 
+        # figure out the number of shards (new shuffled files) to be created
         num_shards = (line_ranges // self.max_shard_size) + 1
         shards = [open(os.path.join(TMP_DIR, f"{self.type}.shard_{n}"), 'w') for n in range(num_shards)]
         logger.info(f"Using {num_shards} shards for {self.type} due to max shard size of {self.max_shard_size}")
 
+        # randomly distribute training file examples amongst shards
         for infile in train_files:
             for line in open(infile):
                 random_shard = random.choice(shards)
                 random_shard.write(line)
 
-
         for s in shards:
             s.close()
 
-        logging.info("Binarizing Shards...")
-        self.binarize_shards(num_shards, TMP_DIR)
+        logging.info("Proessing Shards...")
+        self.process_shards(num_shards, TMP_DIR)
+
+        logging.info(f"Removing temp directory at {TMP_DIR}")
         shutil.rmtree(TMP_DIR)
 
     def set_batch_size(self, batch_size):
         self.batch_size = batch_size
 
-
-    def binarize_shards(self, num_shards, TMP_DIR):
+    def process_shards(self, num_shards, TMP_DIR):
         for shard_id in range(num_shards):
             logging.info(f"Processing shard id {shard_id} for {self.type}")
-            shard = TrainingShard(verbose=self.verbose_data)
+            shard = TrainingShard()
             shard_path = os.path.join(TMP_DIR, f"{self.type}.shard_{shard_id}")
+
+            # iterate over plain text examples
             with open(shard_path) as shard_file:
                 for example in shard_file:
                     example = example.strip().split('\t')
                     langid = example[0]
                     if len(example) > 1:
-                        try:
-                            text = example[1].split(' ')
-                        except:
-                            logging.error("Data is malformatted.")
-                            sys.exit(-1)
-                        self.preprocessor.add_label(langid)
-                        label, hashed_grams = self.preprocessor.process_example(langid, text)
-                        shard.add_example(langid, label, text, hashed_grams)
+                        
+                        label = self.labels.get(langid, len(self.labels))
+                        self.labels[langid] = label
+
+                        if self.bytes:
+                            text = example[1].encode('utf-8')
+                        else:
+                            text = []
+                            for t in example[1]:
+                                t = '[SPACE]' if t == " " else t # replace spaces with text for readability
+                                self.vocab[t] = self.vocab.get(t, len(self.vocab))
+                                text.append(self.vocab[t])
+                        
+                        shard.add_example(label, text)
             shard.shuffle_shard()
             OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.shard_{shard_id}.bin")
             torch.save(shard.save_object(), OUTPUT_PATH)
             self.shards.append(OUTPUT_PATH)
-
 
     def add_user_defined_ids(self, user_defined_ids):
         for id in user_defined_ids:
             if id not in self.labels:
                 self.labels[id] = len(self.labels.keys())
 
+    def set_labels(self, labels):
+        self.labels = labels
+
+    def tok2id(self, tok):
+        if not self.locked_vocab:
+            self.vocab[tok] = self.vocab.get(tok, len(self.vocab))
+        return self.vocab.get(tok, self.vocab["<unk>"])
+
     def __iter__(self):
         for shard_path in self.shards:
             try:
-                shard = TrainingShard(verbose=self.verbose_data)
+                shard = TrainingShard()
                 shard.load_object(torch.load(shard_path))
             except Exception as e:
                 print(e)
                 logger.error(f"Couldn't find processed shard at {shard_path}! Reprocess your data")
                 sys.exit(-1)
-            for langid_batch, id_batch, text_batch, hash_batch, ngram_batch in shard.get_batch(self.batch_size):
-                yield langid_batch, id_batch, text_batch, hash_batch, ngram_batch
+            for label_batch, text_batch in shard.get_batch(self.batch_size):
+                yield torch.tensor(label_batch, dtype=torch.long), text_batch
 
     def save(self):
         output = {
-            "preprocessor": self.preprocessor.save_object(),
+            "bytes": self.bytes,
             "working_dir": self.working_dir,
             "max_shard_size": self.max_shard_size,
             "shards": self.shards,
             "batch_size": self.batch_size,
-            "verbose": self.verbose_data
+            "labels": self.labels,
+            "vocab": self.vocab,
         }
         output_path = os.path.join(self.working_dir, f"{self.type}.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -334,19 +386,13 @@ class Dataset():
     def load(self):
         input_path = os.path.join(self.working_dir, f"{self.type}.json")
         state = json.load(open(input_path))
-        prepro_state = state["preprocessor"]
-        self.preprocessor = Preprocessor(ngram_orders=prepro_state["ngram_orders"],
-                                            num_hashes=prepro_state["num_hashes"],
-                                            max_hash_value=prepro_state["max_hash_value"])
-        self.preprocessor.labels = prepro_state["labels"]
+        self.bytes = state["labels"]
         self.working_dir = state["working_dir"]
         self.max_shard_size = state["max_shard_size"]
         self.shards = state["shards"]
         self.batch_size = state["batch_size"]
-        self.verbose_data = state["verbose"]
-
-
-
+        self.labels = state["labels"]
+        self.vocab = state["vocab"]
 
 
 def parse_args():
@@ -360,11 +406,9 @@ def parse_args():
     parser.add_argument('--valid_files', nargs='*', required=True)
     parser.add_argument('--output_dir', required=True, type=str,
                         help="Output dir to write data files")
-    parser.add_argument('--ngram_orders', default="1,2,3", type=str)
-    parser.add_argument('--max_hash_value', default=128, type=int)
-    parser.add_argument('--num_hashes', default=3, type=int)
+    parser.add_argument('--bytes', action="store_true", default=False)
     parser.add_argument('--max_shard_size', default=200000, type=int)
-    parser.add_argument('--verbose_data', default=False, action="store_true")
+    parser.add_argument('--preset_vocabulary', default=None)
 
 
     args = parser.parse_args()
@@ -372,26 +416,25 @@ def parse_args():
 
 
 def main(args):
-    ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
+    # ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
+
+    if args.preset_vocabulary is not None:
+        vocab = json.load(open(args.preset_vocabulary))
+    else:
+        vocab = None
 
     processed_train_dataset = Dataset(args.output_dir,
-                                        ngram_orders=ngram_orders,
-                                        num_hashes=args.num_hashes,
-                                        max_hash_value=args.max_hash_value,
                                         max_shard_size=args.max_shard_size,
                                         type="train",
-                                        verbose_data=args.verbose_data)
+                                        vocab=None)
     processed_train_dataset.process_data(args.train_files)
     processed_train_dataset.save()
 
     processed_valid_dataset = Dataset(args.output_dir,
-                                        ngram_orders=ngram_orders,
-                                        num_hashes=args.num_hashes,
-                                        max_hash_value=args.max_hash_value,
                                         max_shard_size=args.max_shard_size,
                                         type="valid",
-                                        verbose_data=args.verbose_data)
-    processed_valid_dataset.preprocessor.set_labels(processed_train_dataset.preprocessor.labels)
+                                        vocab=processed_train_dataset.vocab)
+    processed_valid_dataset.set_labels(processed_train_dataset.labels)
     processed_valid_dataset.process_data(args.valid_files)
     processed_valid_dataset.save()
 

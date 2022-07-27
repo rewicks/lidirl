@@ -1,20 +1,28 @@
 import argparse
-import os
+import os, sys
 import logging
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# from torch.utils.tensorboard import SummaryWriter
 import json
 import torchmetrics.classification as tmc
 import metrics
 
-from preprocessor import Dataset
+from preprocessor import Dataset, Processor, NGramProcessor
 from models import CLD3Model
 
-logging.basicConfig(format="%(message)s", level=logging.DEBUG)
-logger = logging.getLogger('gcld3')
+######################################################################################
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=os.environ.get("LOGLEVEL", "INFO").upper(),
+    stream=sys.stderr,
+)
+logger = logging.getLogger("langid")
+
+######################################################################################
 
 class Results():
     def __init__(self, time, device=None, type='TRAINING'):
@@ -52,7 +60,7 @@ class Results():
         retVal['total_loss'] = round(self.total_loss, 4)
         retVal['average_loss'] = round(self.total_loss/self.num_pred, 4)
         retVal['ppl_per_pred'] = round(self.perplexity/self.num_pred, 4)
-        retVal['time_since_last_update'] = round(time.time()-self.last_update)
+        retVal['time_since_last_update'] = round(time.time()-self.last_update, 2)
         retVal['predictions_per_second'] = round(self.num_pred/retVal['time_since_last_update'])
         retVal['time_passed'] = round(time.time()-self.start)
         retVal['validations'] = self.validations
@@ -74,16 +82,18 @@ class Results():
         self.validations += 1
 
 
-def save_model(model, dataset, output_path, device=None, log_output=None):
+def save_model(model, dataset, processor, output_path, device=None, log_output=None):
     model = model.cpu()
     model_dict = model.save_object()
-    model_dict['preprocessor'] = dataset.preprocessor.save_object()
+    model_dict['processor'] = processor.save_object()
+    model_dict['labels'] = dataset.labels
+    model_dict['vocab'] = dataset.vocab
     torch.save(model_dict, output_path)
     model = model.to(device)
     logging.info(f"SAVING MODEL: {json.dumps(log_output)}")
 
 class Trainer():
-    def __init__(self, args):
+    def __init__(self, args, train, valid, model, processor):
         self.with_cuda = torch.cuda.is_available() and not args.cpu
         self.device = torch.device("cuda:0" if self.with_cuda else "cpu")
         logger.info(f"Training on device: {self.device}")
@@ -91,27 +101,19 @@ class Trainer():
         self.output_path = args.output_path
         self.batch_size = args.batch_size
 
-        self.train_dataset = Dataset(args.data_dir, type='train')
-        self.train_dataset.load()
+        self.train_dataset = train
         self.train_dataset.set_batch_size(args.batch_size)
 
-        self.validation_dataset = Dataset(args.data_dir, type='valid')
-        self.validation_dataset.load()
+        self.validation_dataset = valid
         self.validation_dataset.set_batch_size(args.batch_size)
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
 
-        if args.checkpoint_path is not None and os.path.exists(args.checkpoint_path):
-            logging.info('Loading pre-existing model from checkpoint')
-            self.model = load_model(args.checkpoint_path, map_location=self.device)
-        else:
-            self.model = CLD3Model(vocab_size=self.train_dataset.preprocessor.max_hash_value * len(self.train_dataset.preprocessor.ngram_orders),
-                                    hidden_dim=args.hidden_dim,
-                                    embedding_dim=args.embedding_dim,
-                                    label_size=len(self.train_dataset.preprocessor.labels.keys()),
-                                    num_ngram_orders=len(self.train_dataset.preprocessor.ngram_orders)).to(self.device)
+        self.model = model.to(self.device)
         logger.info(self.model)
+
+        self.processor = processor
 
         self.criterion = nn.NLLLoss()
         self.lr = args.lr
@@ -128,21 +130,20 @@ class Trainer():
         self.best_model = None
         self.results = Results(time.time(), device=self.device)
 
-
     def run_epoch(self, args, epoch=0):
 
-        for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.train_dataset):
+        for batch_index, (labels, texts) in enumerate(self.train_dataset):
 
-            ids = ids.to(self.device)
-            inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
-            output = self.model(inputs[0], inputs[1])
+            inputs = self.processor(texts, self.device)
+            labels = labels.to(self.device)
+
+            output = self.model(inputs)
 
             probs = torch.exp(output)
-            loss = self.criterion(output, ids)
-            ppl = torch.exp(F.cross_entropy(output, ids)).item()
+            loss = self.criterion(output, labels)
+            ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
-            if self.results.calculate(loss.item(), ppl, probs, ids) == -1:
-                print(batch_index, langids, ids, texts, hashes, inputs)
+            self.results.calculate(loss.item(), ppl, probs, labels)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -168,7 +169,7 @@ class Trainer():
                             return 0
                 else:
                     self.best_model = validation_results
-                    save_model(self.model, self.train_dataset, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                    save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
             if args.save_every_epoch:
                 save_model(self.model, self.train_dataset, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
         return 1
@@ -179,47 +180,123 @@ class Trainer():
         self.model.eval()
         valid_results = Results(time.time(), device=self.device, type='VALIDATION')
         with torch.no_grad():
-            for batch_index, (langids, ids, texts, hashes, inputs) in enumerate(self.validation_dataset):
-                ids = ids.to(self.device)
-                inputs = (inputs[0].to(self.device), inputs[1].to(self.device))
-                output = self.model(inputs[0], inputs[1])
+            for batch_index, (labels, texts) in enumerate(self.validation_dataset):
+                
+                inputs = self.processor(texts, self.device)
+                labels = labels.to(self.device)
+
+                output = self.model(inputs)
 
                 probs = torch.exp(output)
-                loss = self.criterion(output, ids)
-                ppl = torch.exp(F.cross_entropy(output, ids)).item()
+                loss = self.criterion(output, labels)
+                ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
-                valid_results.calculate(loss.item(), ppl, probs, ids)
+                valid_results.calculate(loss.item(), ppl, probs, labels)
 
         self.model.train()
         ret_results = valid_results.get_results(self.scheduler.get_last_lr()[0])
         ret_results["validation_num"] = validation_num
         return ret_results
 
+############################################ BUILDING AND LOADING UTILS ############################################
+
+def load_data(args):
+    if not os.path.exists(args.data_dir):
+        logging.error(f"Data directory at {args.data_dir} does not exist. Please preprocess the data.")
+        sys.exit(-1)
+    else:
+        train_data =  Dataset(args.data_dir, type="train")
+        train_data.load()
+
+        valid_data = Dataset(args.data_dir, type="valid")
+        valid_data.load()
+
+    return train_data, valid_data
+
+
+def load_model(args):
+    logging.info(f"Loading pre-existing model from checkpoint at {args.checkpoint_path}")
+    if not os.path.exists(args.checkpoint_path):
+        logging.error(f"Checkpoint not found at {args.checkpoint_path}")
+    pass
+
+def build_model(args, dataset):
+    if args.model == "linear-ngram":
+        ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
+        model = CLD3Model(vocab_size=args.max_hash_value * len(ngram_orders),
+                                    hidden_dim=args.hidden_dim,
+                                    embedding_dim=args.embedding_dim,
+                                    label_size=len(dataset.labels.keys()),
+                                    num_ngram_orders=len(ngram_orders))
+    elif args.model == "transformer":
+        pass
+
+    return model
+
+def build_processor(args):
+    if args.model == "linear-ngram":
+        logging.info("Buildling an NGramProcessor for an Ngram Linear Model")
+        processor = NGramProcessor(
+            ngram_orders=[int(n) for n in args.ngram_orders.split(',')],
+            num_hashes=args.num_hashes,
+            max_hash_value=args.max_hash_value
+        )
+    elif args.model == "transformer":  
+        logging.info("Building a base Processor for a Transformer model") 
+        processor = Processor()
+    
+    return processor
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", required=True, type=str)
     parser.add_argument("--output_path", required=True, type=str)
+
     parser.add_argument("--checkpoint_path", type=str, default=None)
-    parser.add_argument('--log_interval', type=int, default=1000)
-    parser.add_argument('--validation_interval', type=int, default=25000)
+
     parser.add_argument("--batch_size", type=int, default=2000)
     parser.add_argument("--tb_dir", type=str, default=None)
+
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--embedding_dim", type=int, default=256)
+    parser.add_argument("--hidden_dim", type=int, default=256)
+
     parser.add_argument("--cpu", action="store_true")
+
     parser.add_argument("--min_epochs", type=int, default=25)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--save_every_epoch", action="store_true", default=False)
-    parser.add_argument("--hidden_dim", type=int, default=256)
+
+    parser.add_argument('--log_interval', type=int, default=1000)
+    parser.add_argument('--validation_interval', type=int, default=25000)
     parser.add_argument("--validation_threshold", type=int, default=10)
 
+    subparsers = parser.add_subparsers(help="Determines the type of model to be built and trained", dest="model")
+    
+    linear_parser = subparsers.add_parser("linear-ngram", help="a linear ngram style model")
+    linear_parser.add_argument("--ngram_orders", default="1,2,3", type=str)
+    linear_parser.add_argument("--max_hash_value", default=128, type=int)
+    linear_parser.add_argument("--num_hashes", default=1, type=int)
+
+    transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
+
     args = parser.parse_args()
+
     return args
 
 
 def main(args):
-    trainer = Trainer(args)
+
+    train, valid = load_data(args)
+
+    if args.checkpoint_path is not None:
+        model = load_model(args)
+    else:
+        model = build_model(args, train)
+
+    processor = build_processor(args)
+
+    trainer = Trainer(args, train, valid, model, processor)
     for ep in range(args.min_epochs):
         logger.info(f"Beginning epoch {ep}")
         epoch_finish = trainer.run_epoch(args, ep)
