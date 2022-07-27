@@ -161,7 +161,7 @@ class Trainer():
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
                         self.best_model = validation_results
-                        save_model(self.model, self.train_dataset, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
                         logging.info(f"Improved accuracy of {validation_results['accuracy']}")
                     else:
                         if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
