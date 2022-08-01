@@ -10,7 +10,7 @@ import torchmetrics.classification as tmc
 import metrics
 
 from preprocessor import Dataset, Processor, NGramProcessor
-from models import CLD3Model, TransformerModel
+from models import CLD3Model, TransformerModel, ConvModel
 
 ######################################################################################
 
@@ -238,6 +238,13 @@ def build_model(args, dataset):
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
                                     max_len=args.max_length)
+    elif args.model == "convolutional":
+        model = ConvModel(vocab_size=len(dataset.vocab),
+                            label_size=len(dataset.labels.keys()),
+                            embedding_dim=args.embedding_dim,
+                            conv_min_width=args.conv_min_width,
+                            conv_max_width=args.conv_max_width,
+                            conv_depth=args.conv_depth)
 
     return model
 
@@ -251,6 +258,9 @@ def build_processor(args):
         )
     elif args.model == "transformer":  
         logger.info("Building a base Processor for a Transformer model") 
+        processor = Processor()
+    elif args.model == "convolutional":
+        logger.info("Building a base Processor for a Convolutional model") 
         processor = Processor()
     
     return processor
@@ -290,6 +300,11 @@ def parse_args():
 
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
+
+    conv_parser = subparsers.add_parser("convolutional", help="a convolutional model")
+    conv_parser.add_argument("--conv_min_width", default=2)
+    conv_parser.add_argument("--conv_max_width", default=5)
+    conv_parser.add_argument("--conv_depth", default=64)
 
     args = parser.parse_args()
 

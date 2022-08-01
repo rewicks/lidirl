@@ -110,3 +110,51 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
+
+class ConvModel(nn.Module):
+    def __init__(self,
+                    vocab_size,
+                    label_size,
+                    embedding_dim=256,
+                    conv_min_width=2,
+                    conv_max_width=5,
+                    conv_depth=64):
+        super(ConvModel, self).__init__()
+        self.vocab_size = vocab_size
+        self.label_size = label_size
+        self.embedding_dim = embedding_dim
+        self.conv_min_width=conv_min_width
+        self.conv_max_width=conv_max_width
+        self.conv_depth=conv_depth
+
+        self.embed = nn.Embedding(vocab_size, embedding_dim)
+
+        self.convolutions = [
+            nn.Conv1d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=width) for width in range(conv_min_width, conv_max_width)
+        ]
+
+        self.proj = nn.Linear(embedding_dim, label_size)
+
+    def forward(self, inputs):
+        embed = self.embed(inputs).transpose(1,2)
+        # embed = embed.view(embed.shape[0], -1, embed.shape[1], embed.shape[2])
+        features = []
+        for layer in self.convolutions:
+            z = layer(embed)
+            features.append(z.squeeze())
+        
+        features = torch.cat(features, dim=2)
+        mean = torch.mean(features, dim=2)
+        output = self.proj(mean)
+        return F.log_softmax(output, dim=-1)
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embedding_size": self.embedding_dim,
+            "label_size": self.label_size,
+            "conv_min_width": self.conv_min_width,
+            "conv_max_width": self.conv_max_width,
+        }
+        return save

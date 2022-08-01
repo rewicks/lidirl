@@ -3,7 +3,7 @@ import torch
 import json
 import sys
 
-from models import CLD3Model
+from models import CLD3Model, TransformerModel
 from preprocessor import Processor, NGramProcessor, TrainingShard
 
 
@@ -18,15 +18,25 @@ class DefaultArgs():
 
 def load_from_checkpoint(checkpoint_path):
     model_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-    model = CLD3Model(vocab_size=model_dict['vocab_size'],
-                        embedding_dim=model_dict['embedding_dim'],
-                        hidden_dim=model_dict['hidden_dim'],
-                        label_size=model_dict['label_size'],
-                        num_ngram_orders=model_dict['num_ngram_orders'])
+    if "embedding_dim" in model_dict:
+        model = CLD3Model(vocab_size=model_dict['vocab_size'],
+                            embedding_dim=model_dict['embedding_dim'],
+                            hidden_dim=model_dict['hidden_dim'],
+                            label_size=model_dict['label_size'],
+                            num_ngram_orders=model_dict['num_ngram_orders'])
+    else:
+        model = TransformerModel(
+            vocab_size=model_dict["vocab_size"],
+            embedding_dim=model_dict["embedding_size"],
+            label_size=model_dict["label_size"],
+            num_layers=model_dict["num_layers"],
+            max_len=model_dict["max_length"],
+            nhead=model_dict["nhead"]
+        )
     model.load_state_dict(model_dict['weights'])
     model.eval()
     vocab = model_dict["vocab"]
-    labels = model_dict["vocab"]
+    labels = model_dict["labels"]
     if len(model['processor']) == 0:
         processor = Processor()
     else:
