@@ -32,40 +32,21 @@ def load_from_checkpoint(checkpoint_path):
             num_layers=model_dict["num_layers"],
             max_len=model_dict["max_length"],
             nhead=model_dict["nhead"]
-        )
+        )    
     model.load_state_dict(model_dict['weights'])
     model.eval()
     vocab = model_dict["vocab"]
     labels = model_dict["labels"]
-    if len(model['processor']) == 0:
+    if len(model_dict['processor']) == 0:
         processor = Processor()
     else:
         processor = NGramProcessor(
-            ngram_orders=model['processor']['ngram_orders'],
+            ngram_orders=model_dict['processor']['ngram_orders'],
             num_hashes=model_dict['processor']['num_hashes'],
             max_hash_value=model_dict['processor']['max_hash_value']
         )
 
     return model, vocab, labels, processor
-
-# def load_preprocessor(model, preprocessor_path=None):
-#     if preprocessor_path is not None:
-#         prepro_dict = json.load(open(preprocessor_path))
-#         prepro_dict = prepro_dict['preprocessor'] 
-#     else:
-#         prepro_dict = model.preprocessor_dict
-
-    
-#     preprocessor = Preprocessor(ngram_orders=prepro_dict['ngram_orders'],
-#                                     num_hashes=prepro_dict['num_hashes'],
-#                                     max_hash_value=prepro_dict['max_hash_value']
-#                                     )
-#     preprocessor.set_labels(prepro_dict['labels'])
-#     preprocessor.set_itos()
-#     return preprocessor
-
-
-
 
 
 class EvalModel():
@@ -76,7 +57,7 @@ class EvalModel():
         self.labels = labels
         self.itos = ["" for _ in labels]
         for l in labels:
-            self.itos[l] = labels[l]
+            self.itos[labels[l]] = l
         self.processor = processor
         # self.preprocessor = load_preprocessor(self.model, preprocessor_path=args.preprocessor_path)
         self.args = args
@@ -88,12 +69,15 @@ class EvalModel():
 
         for labels, texts in data.get_batch(self.args.batch_size):
 
-            inputs = self.processor(texts, self.device)
+            inputs = self.processor(texts, device)
 
             output = self.model(inputs)
             
             probs = torch.exp(output)
-            outputs = self.build_output(probs)
+            try:
+                outputs = self.build_output(probs)
+            except:
+                import pdb; pdb.set_trace()
             for output_line in outputs:
                 print(output_line, file=output_file)
 
@@ -122,7 +106,7 @@ class EvalModel():
             text = []
             for t in line:
                 t = '[SPACE]' if t == ' ' else t
-                text.append(self.vocab.get(t, "<unk>"))
+                text.append(self.vocab.get(t, 0))
             data.add_example(langid, text)
             # label, hashed_grams = self.preprocessor.process_example(langid, line.strip().split())
             # data.add_example(langid, label, line.strip(), hashed_grams)
@@ -140,7 +124,7 @@ def parse_args():
     parser.add_argument('--output', '-o', default=None)
     parser.add_argument('--complete', action='store_true', default=False)
     parser.add_argument('--cpu', action='store_true', default=False)
-    parser.add_argument('--batch_size', default=2000)
+    parser.add_argument('--batch_size', default=2000, type=int)
 
     args = parser.parse_args()
 
