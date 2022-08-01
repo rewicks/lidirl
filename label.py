@@ -4,7 +4,7 @@ import json
 import sys
 
 from models import CLD3Model
-from preprocessor import Preprocessor, TrainingShard
+from preprocessor import Processor, NGramProcessor, TrainingShard
 
 
 import logging
@@ -16,7 +16,7 @@ class DefaultArgs():
     def __init__(self):
         pass
 
-def load_model(checkpoint_path):
+def load_from_checkpoint(checkpoint_path):
     model_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
     model = CLD3Model(vocab_size=model_dict['vocab_size'],
                         embedding_dim=model_dict['embedding_dim'],
@@ -25,23 +25,34 @@ def load_model(checkpoint_path):
                         num_ngram_orders=model_dict['num_ngram_orders'])
     model.load_state_dict(model_dict['weights'])
     model.eval()
-    return model
-
-def load_preprocessor(model, preprocessor_path=None):
-    if preprocessor_path is not None:
-        prepro_dict = json.load(open(preprocessor_path))
-        prepro_dict = prepro_dict['preprocessor'] 
+    vocab = model_dict["vocab"]
+    labels = model_dict["vocab"]
+    if len(model['processor']) == 0:
+        processor = Processor()
     else:
-        prepro_dict = model.preprocessor_dict
+        processor = NGramProcessor(
+            ngram_orders=model['processor']['ngram_orders'],
+            num_hashes=model_dict['processor']['num_hashes'],
+            max_hash_value=model_dict['processor']['max_hash_value']
+        )
+
+    return model, vocab, labels, processor
+
+# def load_preprocessor(model, preprocessor_path=None):
+#     if preprocessor_path is not None:
+#         prepro_dict = json.load(open(preprocessor_path))
+#         prepro_dict = prepro_dict['preprocessor'] 
+#     else:
+#         prepro_dict = model.preprocessor_dict
 
     
-    preprocessor = Preprocessor(ngram_orders=prepro_dict['ngram_orders'],
-                                    num_hashes=prepro_dict['num_hashes'],
-                                    max_hash_value=prepro_dict['max_hash_value']
-                                    )
-    preprocessor.set_labels(prepro_dict['labels'])
-    preprocessor.set_itos()
-    return preprocessor
+#     preprocessor = Preprocessor(ngram_orders=prepro_dict['ngram_orders'],
+#                                     num_hashes=prepro_dict['num_hashes'],
+#                                     max_hash_value=prepro_dict['max_hash_value']
+#                                     )
+#     preprocessor.set_labels(prepro_dict['labels'])
+#     preprocessor.set_itos()
+#     return preprocessor
 
 
 
@@ -49,8 +60,15 @@ def load_preprocessor(model, preprocessor_path=None):
 
 class EvalModel():
     def __init__(self, model_path, args):
-        self.model = load_model(model_path)
-        self.preprocessor = load_preprocessor(self.model, preprocessor_path=args.preprocessor_path)
+        model, vocab, labels, processor = load_from_checkpoint(model_path)
+        self.model = model
+        self.vocab = vocab
+        self.labels = labels
+        self.itos = ["" for _ in labels]
+        for l in labels:
+            self.itos[l] = labels[l]
+        self.processor = processor
+        # self.preprocessor = load_preprocessor(self.model, preprocessor_path=args.preprocessor_path)
         self.args = args
 
 
@@ -58,9 +76,11 @@ class EvalModel():
         self.model = self.model.to(device)
         data = self.build_shard(input_file)
 
-        for langids, id_ids, texts, hashes, inputs in data.get_batch(self.args.batch_size):
-            inputs = (inputs[0].to(device), inputs[1].to(device))
-            output = self.model(inputs[0], inputs[1])
+        for labels, texts in data.get_batch(self.args.batch_size):
+
+            inputs = self.processor(texts, self.device)
+
+            output = self.model(inputs)
             
             probs = torch.exp(output)
             outputs = self.build_output(probs)
@@ -72,13 +92,13 @@ class EvalModel():
         for prediction in probs:
             if self.args.complete:
                 output_dict = {}
-                for langid in self.preprocessor.labels:
-                    output_dict[langid] = prediction[self.preprocessor.labels[langid]].item()
+                for langid in self.labels:
+                    output_dict[langid] = prediction[self.labels[langid]].item()
                 outputs.append(json.dumps(output_dict))
             else:
                 langid_index = torch.argmax(prediction).item()
                 prob = prediction[langid_index].item()
-                output_line = f'{self.preprocessor.itos[langid_index]}\t{prob}'
+                output_line = f'{self.itos[langid_index]}\t{prob}'
                 outputs.append(output_line)
         return outputs
                 
@@ -88,8 +108,14 @@ class EvalModel():
         data = TrainingShard()
         langid = '<unk>'
         for line in input_file:
-            label, hashed_grams = self.preprocessor.process_example(langid, line.strip().split())
-            data.add_example(langid, label, line.strip(), hashed_grams)
+            line = [l for l in line.strip()]
+            text = []
+            for t in line:
+                t = '[SPACE]' if t == ' ' else t
+                text.append(self.vocab.get(t, "<unk>"))
+            data.add_example(langid, text)
+            # label, hashed_grams = self.preprocessor.process_example(langid, line.strip().split())
+            # data.add_example(langid, label, line.strip(), hashed_grams)
         return data
 
 
