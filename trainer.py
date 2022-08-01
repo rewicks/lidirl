@@ -90,7 +90,6 @@ def save_model(model, dataset, processor, output_path, device=None, log_output=N
     model_dict['vocab'] = dataset.vocab
     torch.save(model_dict, output_path)
     model = model.to(device)
-    logging.info(f"SAVING MODEL: {json.dumps(log_output)}")
 
 class Trainer():
     def __init__(self, args, train, valid, model, processor):
@@ -121,9 +120,9 @@ class Trainer():
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1.0, gamma=0.95)
 
         total_params = sum([p.numel() for p in self.model.parameters()])
-        logging.info(f'Training with: {total_params} total parameters')
+        logger.info(f'Training with: {total_params} total parameters')
         if self.with_cuda and torch.cuda.device_count() > 1:
-            logging.info(f"Using {torch.cuda.device_count()} GPUSs for training")
+            logger.info(f"Using {torch.cuda.device_count()} GPUSs for training")
             self.model = nn.DataParallel(self.model)
             self.model = self.model.cuda()
 
@@ -151,27 +150,32 @@ class Trainer():
             self.optimizer.step()
 
             if batch_index % args.log_interval == 0:
-                logging.info(self.results.get_results(self.scheduler.get_last_lr()[0]))
+                logger.info(json.dumps(self.results.get_results(self.scheduler.get_last_lr()[0])))
                 self.results.reset(time.time())
 
             if batch_index % args.validation_interval == 0:
                 validation_results = self.validate(args, validation_num = self.results.validations)
-                logging.info(validation_results)
+                logger.info(json.dumps(validation_results))
                 self.results.validated()
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
                         self.best_model = validation_results
                         save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
-                        logging.info(f"Improved accuracy of {validation_results['accuracy']}")
+                        logger.info(f"Improved accuracy of {validation_results['accuracy']}")
+                    elif validation_results['total_loss'] < self.best_model['total_loss']:
+                        self.best_model = validation_results
+                        save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        logger.info(f"Improved loss of {validation_results['total_loss']}")
                     else:
                         if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
-                            logging.info(f"EARLY STOPPING: {json.dumps(self.best_model)}")
+                            logger.info(f"EARLY STOPPING: {json.dumps(self.best_model)}")
                             return 0
                 else:
                     self.best_model = validation_results
                     save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), device=self.device, log_output=self.best_model)
             if args.save_every_epoch:
-                save_model(self.model, self.train_dataset, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
+                save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
         return 1
 
 
@@ -202,7 +206,7 @@ class Trainer():
 
 def load_data(args):
     if not os.path.exists(args.data_dir):
-        logging.error(f"Data directory at {args.data_dir} does not exist. Please preprocess the data.")
+        logger.error(f"Data directory at {args.data_dir} does not exist. Please preprocess the data.")
         sys.exit(-1)
     else:
         train_data =  Dataset(args.data_dir, type="train")
@@ -215,9 +219,9 @@ def load_data(args):
 
 
 def load_model(args):
-    logging.info(f"Loading pre-existing model from checkpoint at {args.checkpoint_path}")
+    logger.info(f"Loading pre-existing model from checkpoint at {args.checkpoint_path}")
     if not os.path.exists(args.checkpoint_path):
-        logging.error(f"Checkpoint not found at {args.checkpoint_path}")
+        logger.error(f"Checkpoint not found at {args.checkpoint_path}")
     pass
 
 def build_model(args, dataset):
@@ -239,14 +243,14 @@ def build_model(args, dataset):
 
 def build_processor(args):
     if args.model == "linear-ngram":
-        logging.info("Buildling an NGramProcessor for an Ngram Linear Model")
+        logger.info("Buildling an NGramProcessor for an Ngram Linear Model")
         processor = NGramProcessor(
             ngram_orders=[int(n) for n in args.ngram_orders.split(',')],
             num_hashes=args.num_hashes,
             max_hash_value=args.max_hash_value
         )
     elif args.model == "transformer":  
-        logging.info("Building a base Processor for a Transformer model") 
+        logger.info("Building a base Processor for a Transformer model") 
         processor = Processor()
     
     return processor

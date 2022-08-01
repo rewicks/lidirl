@@ -347,7 +347,7 @@ class Dataset():
                             text = []
                             for t in example[1]:
                                 t = '[SPACE]' if t == " " else t # replace spaces with text for readability
-                                self.vocab[t] = self.vocab.get(t, len(self.vocab))
+                                self.vocab[t] = self.tok2id(t)
                                 text.append(self.vocab[t])
                         
                         shard.add_example(label, text)
@@ -390,6 +390,7 @@ class Dataset():
             "batch_size": self.batch_size,
             "labels": self.labels,
             "vocab": self.vocab,
+            "locked": self.locked_vocab
         }
         output_path = os.path.join(self.working_dir, f"{self.type}.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -405,6 +406,7 @@ class Dataset():
         self.batch_size = state["batch_size"]
         self.labels = state["labels"]
         self.vocab = state["vocab"]
+        self.locked_vocab = state["locked"]
 
 
 def parse_args():
