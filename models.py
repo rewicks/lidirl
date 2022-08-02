@@ -137,7 +137,6 @@ class ConvModel(nn.Module):
 
     def forward(self, inputs):
         embed = self.embed(inputs).transpose(1,2)
-        # embed = embed.view(embed.shape[0], -1, embed.shape[1], embed.shape[2])
         features = []
         for layer in self.convolutions:
             z = layer(embed)

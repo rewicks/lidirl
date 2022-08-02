@@ -82,12 +82,14 @@ class Results():
         self.validations += 1
 
 
-def save_model(model, dataset, processor, output_path, device=None, log_output=None):
+def save_model(model, model_type, dataset, processor, output_path, bytes, device=None, log_output=None):
     model = model.cpu()
     model_dict = model.save_object()
     model_dict['processor'] = processor.save_object()
     model_dict['labels'] = dataset.labels
     model_dict['vocab'] = dataset.vocab
+    model_dict['bytes'] = bytes
+    model_dict['model_type'] = model_type
     torch.save(model_dict, output_path)
     model = model.to(device)
 
@@ -160,11 +162,11 @@ class Trainer():
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
                         self.best_model = validation_results
-                        save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
                         logger.info(f"Improved accuracy of {validation_results['accuracy']}")
                     elif validation_results['total_loss'] < self.best_model['total_loss']:
                         self.best_model = validation_results
-                        save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
+                        save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
                         logger.info(f"Improved loss of {validation_results['total_loss']}")
                     else:
                         if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
@@ -172,10 +174,10 @@ class Trainer():
                             return 0
                 else:
                     self.best_model = validation_results
-                    save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), device=self.device, log_output=self.best_model)
-                save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), device=self.device, log_output=self.best_model)
+                    save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
+                save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
             if args.save_every_epoch:
-                save_model(self.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), device=self.device, log_output=self.best_model)
+                save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
         return 1
 
 

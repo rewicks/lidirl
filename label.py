@@ -151,11 +151,6 @@ def label_langs(args):
     model = EvalModel(args.model, args)
     model.label_file(input_file, output_file, device)
     
-    # model.model = model.model.to(device)
-
-    
-        
-
 
 
 def main():
