@@ -25,7 +25,7 @@ logger = logging.getLogger("langid")
 ######################################################################################
 
 class Results():
-    def __init__(self, time, device=None, type='TRAINING'):
+    def __init__(self, time, length=0, device=None, type='TRAINING'):
         self.total_loss = 0
         self.perplexity = 0
         self.accuracy = tmc.Accuracy().to(device)
@@ -34,6 +34,7 @@ class Results():
         self.num_pred = 0
         self.update_num = 0
         self.batches = 0
+        self.length = 0
         self.last_update = time
         self.start = time
         self.validations = 0
@@ -49,10 +50,11 @@ class Results():
         self.num_pred += labels.shape[0]
         self.batches += 1
 
-    def get_results(self, lr):
+    def get_results(self, lr, completed=0):
         retVal = {}
         retVal['type'] = self.type
         retVal['update_num'] = self.update_num
+        retVal['complete'] = round(completed / self.length, 2)
         retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
         retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
         retVal['brier_score'] = round(self.brier_score.compute().item(), 4)
@@ -129,12 +131,12 @@ class Trainer():
             self.model = self.model.cuda()
 
         self.best_model = None
-        self.results = Results(time.time(), device=self.device)
+        self.results = Results(time.time(), length=self.train_dataset.size(), device=self.device)
 
     def run_epoch(self, args, epoch=0):
-
+        completed = 0
         for batch_index, (labels, texts) in enumerate(self.train_dataset):
-
+            completed += len(labels)
             inputs = self.processor(texts, self.device)
             labels = labels.to(self.device)
 
@@ -152,7 +154,7 @@ class Trainer():
             self.optimizer.step()
 
             if batch_index % args.log_interval == 0:
-                logger.info(json.dumps(self.results.get_results(self.scheduler.get_last_lr()[0])))
+                logger.info(json.dumps(self.results.get_results(self.scheduler.get_last_lr()[0], completed=completed)))
                 self.results.reset(time.time())
 
             if batch_index % args.validation_interval == 0:

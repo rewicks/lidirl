@@ -130,6 +130,9 @@ class TrainingShard():
     def load_object(self, data):
         self.data = [TrainingExample(d[0], d[1]) for d in data]
 
+    def size(self):
+        return len(self.data)
+
 class Processor():
     def __init__(self):
         pass
@@ -407,6 +410,9 @@ class Dataset():
         self.labels = state["labels"]
         self.vocab = state["vocab"]
         self.locked_vocab = state["locked"]
+
+    def size(self):
+        return sum([shard.size() for shard in self.shards])
 
 
 def parse_args():
