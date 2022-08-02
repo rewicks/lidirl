@@ -302,11 +302,12 @@ def parse_args():
 
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
+    transformer_parser.add_argument("--nhead", default=4, type=int)
 
     conv_parser = subparsers.add_parser("convolutional", help="a convolutional model")
-    conv_parser.add_argument("--conv_min_width", default=2)
-    conv_parser.add_argument("--conv_max_width", default=5)
-    conv_parser.add_argument("--conv_depth", default=64)
+    conv_parser.add_argument("--conv_min_width", default=2, type=int)
+    conv_parser.add_argument("--conv_max_width", default=5, type=int)
+    conv_parser.add_argument("--conv_depth", default=64, type=int)
 
     args = parser.parse_args()
 

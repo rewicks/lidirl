@@ -129,9 +129,9 @@ class ConvModel(nn.Module):
 
         self.embed = nn.Embedding(vocab_size, embedding_dim)
 
-        self.convolutions = [
+        self.convolutions = nn.ModuleList([
             nn.Conv1d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=width) for width in range(conv_min_width, conv_max_width)
-        ]
+        ])
 
         self.proj = nn.Linear(embedding_dim, label_size)
 
