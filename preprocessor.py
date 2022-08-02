@@ -412,7 +412,15 @@ class Dataset():
         self.locked_vocab = state["locked"]
 
     def size(self):
-        return sum([shard.size() for shard in self.shards])
+        size = 0
+        for shard_path in self.shards:
+            try:
+                shard = TrainingShard()
+                shard.load_object(torch.load(shard_path))
+                size += shard.size()
+            except:
+                pass
+        return shard
 
 
 def parse_args():
