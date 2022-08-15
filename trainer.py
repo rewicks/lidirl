@@ -25,7 +25,7 @@ logger = logging.getLogger("langid")
 ######################################################################################
 
 class Results():
-    def __init__(self, time, length=0, device=None, type='TRAINING'):
+    def __init__(self, time, length=1, device=None, type='TRAINING'):
         self.total_loss = 0
         self.perplexity = 0
         self.accuracy = tmc.Accuracy().to(device)
@@ -34,7 +34,7 @@ class Results():
         self.num_pred = 0
         self.update_num = 0
         self.batches = 0
-        self.length = 0
+        self.length = length
         self.last_update = time
         self.start = time
         self.validations = 0
@@ -50,7 +50,7 @@ class Results():
         self.num_pred += labels.shape[0]
         self.batches += 1
 
-    def get_results(self, lr, completed=0):
+    def get_results(self, lr, completed=1):
         retVal = {}
         retVal['type'] = self.type
         retVal['update_num'] = self.update_num
@@ -143,6 +143,7 @@ class Trainer():
             output = self.model(inputs)
 
             probs = torch.exp(output)
+
             loss = self.criterion(output, labels)
             ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
@@ -331,11 +332,15 @@ def main(args):
     for ep in range(args.min_epochs):
         logger.info(f"Beginning epoch {ep}")
         epoch_finish = trainer.run_epoch(args, ep)
-        if epoch_finish == 0:
-            break
         trainer.scheduler.step()
 
-
+    for ep in range(args.min_epochs, args.max_epochs):
+        logger.info(f"Beginning epoch {ep}")
+        epoch_finish = trainer.run_epoch(args.ep)
+        if epoch_finish == 0:
+            logger.info("Finished training")
+            break
+        trainer.scheduler.step()
 
 
 if __name__ == "__main__":

@@ -420,7 +420,7 @@ class Dataset():
                 size += shard.size()
             except:
                 pass
-        return shard
+        return size
 
 
 def parse_args():

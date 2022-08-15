@@ -3,7 +3,7 @@ import torch
 import json
 import sys
 
-from models import CLD3Model, TransformerModel
+from models import CLD3Model, TransformerModel, ConvModel
 from preprocessor import Processor, NGramProcessor, TrainingShard
 
 
@@ -18,13 +18,18 @@ class DefaultArgs():
 
 def load_from_checkpoint(checkpoint_path):
     model_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-    if "embedding_dim" in model_dict:
+    if model_dict["model_type"] == "linear-ngram":
         model = CLD3Model(vocab_size=model_dict['vocab_size'],
                             embedding_dim=model_dict['embedding_dim'],
                             hidden_dim=model_dict['hidden_dim'],
                             label_size=model_dict['label_size'],
                             num_ngram_orders=model_dict['num_ngram_orders'])
-    else:
+        processor = NGramProcessor(
+            ngram_orders=model_dict['processor']['ngram_orders'],
+            num_hashes=model_dict['processor']['num_hashes'],
+            max_hash_value=model_dict['processor']['max_hash_value']
+        )
+    elif model_dict["model_type"] == "transformer":
         model = TransformerModel(
             vocab_size=model_dict["vocab_size"],
             embedding_dim=model_dict["embedding_size"],
@@ -33,19 +38,18 @@ def load_from_checkpoint(checkpoint_path):
             max_len=model_dict["max_length"],
             nhead=model_dict["nhead"]
         )    
+        processor = Processor()
+    elif model_dict["model_type"] == "convolutional":
+        model = ConvModel(vocab_size=model_dict["vocab_size"],
+                            label_size=model_dict["label_size"],
+                            embedding_dim=model_dict["embedding_size"],
+                            conv_min_width=model_dict["conv_min_width"],
+                            conv_max_width=model_dict["conv_max_width"])
+        processor = Processor()
     model.load_state_dict(model_dict['weights'])
     model.eval()
     vocab = model_dict["vocab"]
     labels = model_dict["labels"]
-    if len(model_dict['processor']) == 0:
-        processor = Processor()
-    else:
-        processor = NGramProcessor(
-            ngram_orders=model_dict['processor']['ngram_orders'],
-            num_hashes=model_dict['processor']['num_hashes'],
-            max_hash_value=model_dict['processor']['max_hash_value']
-        )
-
     return model, vocab, labels, processor
 
 

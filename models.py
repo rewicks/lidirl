@@ -140,7 +140,7 @@ class ConvModel(nn.Module):
         features = []
         for layer in self.convolutions:
             z = layer(embed)
-            features.append(z.squeeze())
+            features.append(z)
         
         features = torch.cat(features, dim=2)
         mean = torch.mean(features, dim=2)
