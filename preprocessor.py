@@ -142,6 +142,9 @@ class Processor():
     def process_example(self, text, device):
         return self.pad_batch(text, device)
 
+    def process_label(self, labels, device):
+        return labels.to(device)
+
     def pad_batch(self, batch, device, max_size=None):
         max_size = 0
         for item in batch:
@@ -154,8 +157,8 @@ class Processor():
                 new_batch[-1].append(0)
         return torch.tensor(new_batch).to(device)
 
-    def __call__(self, text, device):
-        return self.process_example(text, device)
+    def __call__(self, text, labels, device):
+        return self.process_example(text, device), self.process_label(labels, device)
 
     def save_object(self):
         return {}
