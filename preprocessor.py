@@ -128,7 +128,9 @@ class TrainingShard():
         return [_.save_object() for _ in self.data]
 
     def load_object(self, data):
-        self.data = [TrainingExample(d[0], d[1]) for d in data]
+        self.data = []
+        for d in data:
+            self.data.append(TrainingExample(d[0], d[1]))
 
     def size(self):
         return len(self.data)
