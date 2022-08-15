@@ -1,5 +1,6 @@
 import argparse
 import os, sys
+from re import M
 import logging
 import time
 import torch
@@ -9,8 +10,8 @@ import json
 import torchmetrics.classification as tmc
 import metrics
 
-from preprocessor import Dataset, Processor, NGramProcessor
-from models import CLD3Model, TransformerModel, ConvModel
+from preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
+from models import CLD3Model, TransformerModel, ConvModel, UNETModel
 
 ######################################################################################
 
@@ -43,11 +44,19 @@ class Results():
     def calculate(self, loss, ppl, y_hat, labels):
         self.total_loss += loss
         self.perplexity += ppl
-        self.accuracy.update(y_hat, labels)
-        if self.calibration_error.update(y_hat, labels) == -1:
-            return -1
-        self.brier_score.update(y_hat, labels)
-        self.num_pred += labels.shape[0]
+        if len(labels.shape) == 2:
+            for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
+                self.accuracy.update(y_h, l)
+                if self.calibration_error.update(y_h, l) == -1:
+                    return -1
+                self.brier_score.update(y_h, l)
+                self.num_pred += l.shape[0]
+        else:
+            self.accuracy.update(y_hat, labels)
+            if self.calibration_error.update(y_hat, labels) == -1:
+                return -1
+            self.brier_score.update(y_hat, labels)
+            self.num_pred += labels.shape[0]
         self.batches += 1
 
     def get_results(self, lr, completed=1):
@@ -137,15 +146,21 @@ class Trainer():
         completed = 0
         for batch_index, (labels, texts) in enumerate(self.train_dataset):
             completed += len(labels)
-            inputs = self.processor(texts, self.device)
-            labels = labels.to(self.device)
+            inputs, labels = self.processor(texts, labels, self.device)
 
             output = self.model(inputs)
 
             probs = torch.exp(output)
-
-            loss = self.criterion(output, labels)
-            ppl = torch.exp(F.cross_entropy(output, labels)).item()
+            if args.model == "unet":
+                loss = 0
+                ppl = 0
+                for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
+                    loss += self.criterion(o, l)
+                    ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                
+            else:
+                loss = self.criterion(output, labels)
+                ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
             self.results.calculate(loss.item(), ppl, probs, labels)
 
@@ -187,18 +202,26 @@ class Trainer():
 
     def validate(self, args, validation_num=0):
         self.model.eval()
-        valid_results = Results(time.time(), device=self.device, type='VALIDATION')
+        valid_results = Results(time.time(), length=self.validation_dataset.size(), device=self.device, type='VALIDATION')
         with torch.no_grad():
             for batch_index, (labels, texts) in enumerate(self.validation_dataset):
                 
-                inputs = self.processor(texts, self.device)
-                labels = labels.to(self.device)
+                inputs, labels = self.processor(texts, labels, self.device)
+                # labels = labels.to(self.device)
 
                 output = self.model(inputs)
 
+                if args.model == "unet":
+                    loss = 0
+                    ppl = 0
+                    for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
+                        loss += self.criterion(o, l)
+                        ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                else:
+                    loss = self.criterion(output, labels)
+                    ppl = torch.exp(F.cross_entropy(output, labels)).item()
+
                 probs = torch.exp(output)
-                loss = self.criterion(output, labels)
-                ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
                 valid_results.calculate(loss.item(), ppl, probs, labels)
 
@@ -251,6 +274,12 @@ def build_model(args, dataset):
                             conv_max_width=args.conv_max_width,
                             conv_depth=args.conv_depth)
 
+    elif args.model == "unet":
+        model = UNETModel(vocab_size=len(dataset.vocab),
+                            label_size=len(dataset.labels.keys()),
+                            embed_size=args.embedding_dim,
+        )
+
     return model
 
 def build_processor(args):
@@ -267,6 +296,9 @@ def build_processor(args):
     elif args.model == "convolutional":
         logger.info("Building a base Processor for a Convolutional model") 
         processor = Processor()
+    elif args.model == "unet":
+        logger.info("Building a base Processor for a UNet model") 
+        processor = PaddedProcessor(args.pad_length)     
     
     return processor
 
@@ -311,6 +343,9 @@ def parse_args():
     conv_parser.add_argument("--conv_min_width", default=2, type=int)
     conv_parser.add_argument("--conv_max_width", default=5, type=int)
     conv_parser.add_argument("--conv_depth", default=64, type=int)
+
+    unet_parser = subparsers.add_parser("unet", help="a unet model")
+    unet_parser.add_argument("--pad_length", default=1024, type=int)
 
     args = parser.parse_args()
 

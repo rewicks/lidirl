@@ -158,6 +158,34 @@ class Processor():
     def save_object(self):
         return {}
 
+class PaddedProcessor(Processor):
+    def __init__(self, pad_length):
+        self.pad_length = pad_length
+
+    def pad_batch(self, batch, device):
+        new_batch = []
+        for item in batch:
+            new_batch.append(item)
+            while len(new_batch[-1]) < self.pad_length:
+                new_batch[-1].append(0)
+        return torch.tensor(new_batch).to(device)
+
+    def process_example(self, text, device):
+        return self.pad_batch(text, device)
+
+    def process_labels(self, labels, device):
+        if len(labels.shape) == 1:
+            return torch.tensor([[l for _ in range(self.pad_length)] for l in labels]).to(device)
+        return labels
+
+    def __call__(self, text, labels, device):
+        return self.process_example(text, device), self.process_labels(labels, device)
+
+    def save_object(self):
+        return {
+            "pad_length": self.pad_length
+        }
+
 class NGramProcessor(Processor):
     def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):
         self.ngram_orders = ngram_orders
