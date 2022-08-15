@@ -318,6 +318,7 @@ class Dataset():
         self.shards = []
         self.type = type
         self.bytes = bytes
+        self.size = 0
 
     def process_data(self, train_files):
 
@@ -343,6 +344,7 @@ class Dataset():
             for line in open(infile):
                 random_shard = random.choice(shards)
                 random_shard.write(line)
+                self.size += 1
 
         for s in shards:
             s.close()
@@ -421,7 +423,8 @@ class Dataset():
             "batch_size": self.batch_size,
             "labels": self.labels,
             "vocab": self.vocab,
-            "locked": self.locked_vocab
+            "locked": self.locked_vocab,
+            "size": self.size
         }
         output_path = os.path.join(self.working_dir, f"{self.type}.json")
         json.dump(output, open(output_path, 'w'), indent=2)
@@ -438,17 +441,10 @@ class Dataset():
         self.labels = state["labels"]
         self.vocab = state["vocab"]
         self.locked_vocab = state["locked"]
+        self.size = state["size"]
 
-    def size(self):
-        size = 0
-        for shard_path in self.shards:
-            try:
-                shard = TrainingShard()
-                shard.load_object(torch.load(shard_path))
-                size += shard.size()
-            except:
-                pass
-        return size
+    def __len__(self):
+        return self.size
 
 
 def parse_args():

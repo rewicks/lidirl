@@ -140,7 +140,7 @@ class Trainer():
             self.model = self.model.cuda()
 
         self.best_model = None
-        self.results = Results(time.time(), length=self.train_dataset.size(), device=self.device)
+        self.results = Results(time.time(), length=len(self.train_dataset), device=self.device)
 
     def run_epoch(self, args, epoch=0):
         completed = 0
@@ -202,7 +202,7 @@ class Trainer():
 
     def validate(self, args, validation_num=0):
         self.model.eval()
-        valid_results = Results(time.time(), length=self.validation_dataset.size(), device=self.device, type='VALIDATION')
+        valid_results = Results(time.time(), length=len(self.validation_dataset), device=self.device, type='VALIDATION')
         with torch.no_grad():
             for batch_index, (labels, texts) in enumerate(self.validation_dataset):
                 
