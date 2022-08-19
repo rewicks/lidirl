@@ -214,7 +214,9 @@ class Trainer():
                 if args.model == "unet":
                     loss = 0
                     ppl = 0
-                    for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
+                    for i, o, l in zip(inputs.transpose(0, 1), output.transpose(0,1), labels.transpose(0,1)):
+                        if sum(i) == 0:
+                            break
                         loss += self.criterion(o, l)
                         ppl += torch.exp(F.cross_entropy(o, l)).item() 
                 else:
