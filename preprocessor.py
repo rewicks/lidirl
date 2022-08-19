@@ -170,7 +170,7 @@ class PaddedProcessor(Processor):
     def pad_batch(self, batch, device):
         new_batch = []
         for item in batch:
-            new_batch.append(item)
+            new_batch.append(item[:self.pad_length])
             while len(new_batch[-1]) < self.pad_length:
                 new_batch[-1].append(0)
         return torch.tensor(new_batch).to(device)

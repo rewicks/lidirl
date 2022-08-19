@@ -227,6 +227,7 @@ class UNETModel(nn.Module):
 
     
     def forward(self, inputs):
+        inputs = inputs[:, :self.length]
         emb = self.embed(inputs).transpose(1,2)
         encoding = self.encoder(emb)
         decoding = self.decoder(encoding[::-1][0], encoding[::-1][1:])
