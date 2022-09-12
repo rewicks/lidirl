@@ -73,7 +73,7 @@ class EvalModel():
 
         for labels, texts in data.get_batch(self.args.batch_size):
 
-            inputs = self.processor(texts, device)
+            inputs = self.processor(texts, labels, device)
 
             output = self.model(inputs)
             

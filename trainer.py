@@ -339,7 +339,7 @@ def parse_args():
 
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
-    transformer_parser.add_argument("--nhead", default=4, type=int)
+    transformer_parser.add_argument("--nhead", default=8, type=int)
 
     conv_parser = subparsers.add_parser("convolutional", help="a convolutional model")
     conv_parser.add_argument("--conv_min_width", default=2, type=int)
@@ -373,7 +373,7 @@ def main(args):
 
     for ep in range(args.min_epochs, args.max_epochs):
         logger.info(f"Beginning epoch {ep}")
-        epoch_finish = trainer.run_epoch(args.ep)
+        epoch_finish = trainer.run_epoch(args, ep)
         if epoch_finish == 0:
             logger.info("Finished training")
             break
