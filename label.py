@@ -72,8 +72,9 @@ class EvalModel():
         data = self.build_shard(input_file)
 
         for labels, texts in data.get_batch(self.args.batch_size):
-
-            inputs = self.processor(texts, labels, device)
+            
+            inputs = torch.tensor(labels)
+            inputs, labels = self.processor(texts, labels, self.device)
 
             output = self.model(inputs)
             
