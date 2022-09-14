@@ -73,8 +73,8 @@ class EvalModel():
 
         for labels, texts in data.get_batch(self.args.batch_size):
             
-            inputs = torch.tensor(labels)
-            inputs, labels = self.processor(texts, labels, self.device)
+            labels = torch.tensor(labels, dtype=torch.long)
+            inputs, labels = self.processor(texts, labels, device)
 
             output = self.model(inputs)
             
@@ -105,7 +105,7 @@ class EvalModel():
 
     def build_shard(self, input_file):
         data = TrainingShard()
-        langid = '<unk>'
+        langid = self.labels.get('<unk>', 0)
         for line in input_file:
             line = [l for l in line.strip()]
             text = []
