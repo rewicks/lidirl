@@ -144,6 +144,7 @@ class Trainer():
 
     def run_epoch(self, args, epoch=0):
         completed = 0
+        running_loss = 0
         for batch_index, (labels, texts) in enumerate(self.train_dataset):
             completed += len(labels)
             inputs, labels = self.processor(texts, labels, self.device)
@@ -157,17 +158,21 @@ class Trainer():
                 for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
                     loss += self.criterion(o, l)
                     ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                running_loss += loss
                 
             else:
                 loss = self.criterion(output, labels)
+                running_loss += loss
                 ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
             self.results.calculate(loss.item(), ppl, probs, labels)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-            self.optimizer.step()
+            if batch_index % args.update_interval == 0:
+                self.optimizer.zero_grad()
+                running_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+                self.optimizer.step()
+                running_loss = 0
 
             if batch_index % args.log_interval == 0:
                 logger.info(json.dumps(self.results.get_results(self.scheduler.get_last_lr()[0], completed=completed)))
@@ -324,6 +329,7 @@ def parse_args():
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--save_every_epoch", action="store_true", default=False)
 
+    parser.add_argument("--update_interval", type=int, default=1)
     parser.add_argument('--log_interval', type=int, default=1000)
     parser.add_argument('--validation_interval', type=int, default=25000)
     parser.add_argument("--validation_threshold", type=int, default=10)
