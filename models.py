@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torchvision
 # import json
 import math
+from transformers import RoFormerModel, RoFormerConfig
 
 class CLD3Model(nn.Module):
     def __init__(self, vocab_size,
@@ -43,6 +44,66 @@ class CLD3Model(nn.Module):
             "num_ngram_orders": self.num_ngram_orders,
             "embedding_dim": self.embedding_dim,
             "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size
+        }
+        return save
+
+
+class RoformerModel(nn.Module):
+    def __init__(self,
+                    vocab_size,
+                    embedding_dim,
+                    hidden_dim,
+                    label_size,
+                    num_layers,
+                    max_len,
+                    nhead=8,
+                    dropout=0.1
+                    ):
+        super(RoformerModel, self).__init__()
+        self.config = RoFormerConfig(
+            vocab_size = vocab_size,
+            embedding_size = embedding_dim,
+            hidden_size = hidden_dim,
+            num_hidden_layers = num_layers,
+            num_attention_heads = nhead,
+            intermediate_size = hidden_dim,
+            hidden_dropout_prob = dropout,
+            attention_probs_dropout_prob = dropout,
+            max_position_embeddings = max_len,
+            type_vocab_size = 2,
+            rotary_value = False
+        )
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_dim
+        self.hidden_size = hidden_dim
+        self.num_hidden_layers = num_layers
+        self.num_attention_heads = nhead
+        self.intermediate_size = hidden_dim
+        self.hidden_dropout_prob = dropout
+        self.attention_probs_dropout_prob = dropout
+        self.max_position_embeddings = max_len
+        self.label_size = label_size
+
+        self.model = RoFormerModel(self.config)
+        self.proj = nn.Linear(embedding_dim, label_size)
+
+    def forward(self, inputs):
+        inputs = inputs[:, :self.max_position_embeddings]
+        encoding = torch.mean(self.model(inputs).last_hidden_state, dim=1)
+        output = self.proj(encoding)
+        return F.log_softmax(output, dim=-1)
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size" : self.vocab_size,
+            "embedding_dim" : self.embedding_size,
+            "hidden_dim" : self.hidden_size,
+            "num_layers" : self.num_hidden_layers,
+            "nhead" : self.num_attention_heads,
+            "dropout": self.hidden_dropout_prob,
+            "max_len": self.max_position_embeddings,
             "label_size": self.label_size
         }
         return save

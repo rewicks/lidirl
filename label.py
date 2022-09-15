@@ -3,7 +3,7 @@ import torch
 import json
 import sys
 
-from models import CLD3Model, TransformerModel, ConvModel
+from models import CLD3Model, RoformerModel, TransformerModel, ConvModel
 from preprocessor import Processor, NGramProcessor, TrainingShard
 
 
@@ -39,6 +39,18 @@ def load_from_checkpoint(checkpoint_path):
             nhead=model_dict["nhead"]
         )    
         processor = Processor()
+    elif model_dict["model_type"] == "roformer":
+        model = RoformerModel(
+                    vocab_size=model_dict["vocab_size"],
+                    embedding_dim=model_dict["embedding_dim"],
+                    hidden_dim=model_dict["hidden_dim"],
+                    label_size=model_dict["label_size"],
+                    num_layers=model_dict["num_layers"],
+                    max_len=model_dict["max_len"],
+                    nhead=model_dict["nhead"],
+                    dropout=model_dict["dropout"]
+        )
+        processor = Processor()
     elif model_dict["model_type"] == "convolutional":
         model = ConvModel(vocab_size=model_dict["vocab_size"],
                             label_size=model_dict["label_size"],
@@ -72,7 +84,7 @@ class EvalModel():
         data = self.build_shard(input_file)
 
         for labels, texts in data.get_batch(self.args.batch_size):
-            
+
             labels = torch.tensor(labels, dtype=torch.long)
             inputs, labels = self.processor(texts, labels, device)
 

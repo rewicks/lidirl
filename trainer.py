@@ -11,7 +11,7 @@ import torchmetrics.classification as tmc
 import metrics
 
 from preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
-from models import CLD3Model, TransformerModel, ConvModel, UNETModel
+from models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel
 
 ######################################################################################
 
@@ -273,6 +273,13 @@ def build_model(args, dataset):
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
                                     max_len=args.max_length)
+    elif args.model == "roformer":
+        model = RoformerModel(vocab_size=len(dataset.vocab),
+                                    embedding_dim=args.embedding_dim,
+                                    hidden_dim=args.hidden_dim,
+                                    label_size=len(dataset.labels.keys()),
+                                    num_layers=args.num_layers,
+                                    max_len=args.max_length)
     elif args.model == "convolutional":
         model = ConvModel(vocab_size=len(dataset.vocab),
                             label_size=len(dataset.labels.keys()),
@@ -300,6 +307,9 @@ def build_processor(args):
     elif args.model == "transformer":  
         logger.info("Building a base Processor for a Transformer model") 
         processor = Processor()
+    elif args.model == "roformer":
+        logger.info("Building a base Processor for a Roformer Model")
+        processor = Processor()
     elif args.model == "convolutional":
         logger.info("Building a base Processor for a Convolutional model") 
         processor = Processor()
@@ -322,6 +332,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--embedding_dim", type=int, default=256)
     parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--dropout", type=float, default=0.1)
 
     parser.add_argument("--cpu", action="store_true")
 
@@ -346,6 +357,10 @@ def parse_args():
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
     transformer_parser.add_argument("--nhead", default=8, type=int)
+
+    roformer_parser = subparsers.add_parser("roformer", help="a roformer model")
+    roformer_parser.add_argument("--max-length", default=1024, type=int)
+    roformer_parser.add_argument("--nhead", default=8, type=int)
 
     conv_parser = subparsers.add_parser("convolutional", help="a convolutional model")
     conv_parser.add_argument("--conv_min_width", default=2, type=int)
