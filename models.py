@@ -86,7 +86,7 @@ class RoformerModel(nn.Module):
         self.label_size = label_size
 
         self.model = RoFormerModel(self.config)
-        self.proj = nn.Linear(embedding_dim, label_size)
+        self.proj = nn.Linear(hidden_dim, label_size)
 
     def forward(self, inputs):
         inputs = inputs[:, :self.max_position_embeddings]

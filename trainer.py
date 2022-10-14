@@ -272,14 +272,17 @@ def build_model(args, dataset):
                                     embedding_dim=args.embedding_dim,
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
-                                    max_len=args.max_length)
+                                    max_len=args.max_length,
+                                    nhead=args.nhead)
     elif args.model == "roformer":
         model = RoformerModel(vocab_size=len(dataset.vocab),
                                     embedding_dim=args.embedding_dim,
                                     hidden_dim=args.hidden_dim,
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
-                                    max_len=args.max_length)
+                                    max_len=args.max_length,
+                                    nhead=args.nhead,
+                                    dropout=args.dropout)
     elif args.model == "convolutional":
         model = ConvModel(vocab_size=len(dataset.vocab),
                             label_size=len(dataset.labels.keys()),

@@ -141,7 +141,7 @@ def parse_args():
     parser.add_argument('--output', '-o', default=None)
     parser.add_argument('--complete', action='store_true', default=False)
     parser.add_argument('--cpu', action='store_true', default=False)
-    parser.add_argument('--batch_size', default=2000, type=int)
+    parser.add_argument('--batch_size', default=500, type=int)
 
     args = parser.parse_args()
 

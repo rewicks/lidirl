@@ -121,8 +121,8 @@ class TrainingShard():
                 yield batch.labels, batch.texts
                 batch = Batch()
             batch.add(training_example)
-
-        yield batch.labels, batch.texts
+        if len(batch.labels) > 0:
+            yield batch.labels, batch.texts
 
     def save_object(self):
         return [_.save_object() for _ in self.data]
@@ -222,11 +222,10 @@ class NGramProcessor(Processor):
                     ngram_weights = [w for _, w in hashed_ngrams[idx][tok_idx]]
                     ngrams[idx].append(hash_ids)
                     weights[idx].append(ngram_weights)
-                max_size = max(max_size, len(ngrams[-1]))
+                max_size = max(max_size, max([len(n) for n in ngrams]))
 
             batched_ngrams.append(ngrams)
             batched_weights.append(weights)
-
         return self.pad_batch((batched_ngrams, batched_weights), device, max_size)
 
     def pad_batch(self, batch, device, max_size=None):
