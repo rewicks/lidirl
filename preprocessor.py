@@ -324,7 +324,7 @@ class Dataset():
         self.bytes = bytes
         self.size = 0
 
-    def process_data(self, train_files):
+    def process_data(self, train_files, temperature=1.0):
 
         TMP_DIR = os.path.join(self.working_dir, 'tmp/')
         logging.info(f"Making temp directory at {TMP_DIR}")
@@ -332,9 +332,24 @@ class Dataset():
 
         # get line numbers for shards; randomly shuffle after
         line_ranges = 0
+        class_counts = {}
         for infile in train_files:
             for line in open(infile):
                 line_ranges += 1
+                class_counts[line.split('\t')[0]] = class_counts.get(line.split('\t')[0], 0) + 1
+
+        total = sum(class_counts.values())
+        class_probabilities = {}
+        for class_key, count in class_counts.items():
+            class_probabilities[class_key] = math.pow(count/total, temperature)
+        
+        total = sum(class_probabilities.values())
+        class_samples = {}
+        for class_key, prob in class_probabilities.items():
+            class_probabilities[class_key] = prob / total
+            class_samples[class_key] = (class_probabilities[class_key] * line_ranges) / class_counts[class_key]
+            sampled_sentences = class_probabilities[class_key] * line_ranges
+            logger.info(f"Sampling {class_key} with {class_probabilities[class_key]:.2f} probability. Will use {sampled_sentences} training examples from a total of {class_counts[class_key]}")
 
         logger.info(f"Found {line_ranges} {self.type} examples in {len(train_files)} files.")
 
@@ -346,9 +361,18 @@ class Dataset():
         # randomly distribute training file examples amongst shards
         for infile in train_files:
             for line in open(infile):
-                random_shard = random.choice(shards)
-                random_shard.write(line)
-                self.size += 1
+                class_id = line.split('\t')[0]
+                sample = random.random()
+                sampling_rate = class_samples[class_id]
+                while sampling_rate >= 1.0:
+                    random_shard = random.choice(shards)
+                    random_shard.write(line)
+                    self.size += 1
+                    sampling_rate -= 1
+                if sampling_rate <= sample:
+                    random_shard = random.choice(shards)
+                    random_shard.write(line)
+                    self.size += 1
 
         for s in shards:
             s.close()
@@ -465,6 +489,7 @@ def parse_args():
     parser.add_argument('--bytes', action="store_true", default=False)
     parser.add_argument('--max_shard_size', default=200000, type=int)
     parser.add_argument('--preset_vocabulary', default=None)
+    parser.add_argument('--temperature', type=float, default=1.0)
 
 
     args = parser.parse_args()
@@ -483,7 +508,7 @@ def main(args):
                                         max_shard_size=args.max_shard_size,
                                         type="train",
                                         vocab=None)
-    processed_train_dataset.process_data(args.train_files)
+    processed_train_dataset.process_data(args.train_files, temperature=args.temperature)
     processed_train_dataset.save()
 
     processed_valid_dataset = Dataset(args.output_dir,
