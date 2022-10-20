@@ -369,7 +369,7 @@ class Dataset():
                     random_shard.write(line)
                     self.size += 1
                     sampling_rate -= 1
-                if sampling_rate <= sample:
+                if sample <= sampling_rate:
                     random_shard = random.choice(shards)
                     random_shard.write(line)
                     self.size += 1
