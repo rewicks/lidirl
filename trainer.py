@@ -46,15 +46,17 @@ class Results():
         self.perplexity += ppl
         if len(labels.shape) == 2:
             for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
-                self.accuracy.update(y_h, l)
-                if self.calibration_error.update(y_h, l) == -1:
-                    return -1
+                if self.type == "VALIDATION":
+                    self.accuracy.update(y_h, l)
+                    if self.calibration_error.update(y_h, l) == -1:
+                        return -1
                 #self.brier_score.update(y_h, l)
                 self.num_pred += l.shape[0]
         else:
-            self.accuracy.update(y_hat, labels)
-            if self.calibration_error.update(y_hat, labels) == -1:
-                return -1
+            if self.type == "VALIDATION":
+                self.accuracy.update(y_hat, labels)
+                if self.calibration_error.update(y_hat, labels) == -1:
+                    return -1
             #self.brier_score.update(y_hat, labels)
             self.num_pred += labels.shape[0]
         self.batches += 1
@@ -64,8 +66,9 @@ class Results():
         retVal['type'] = self.type
         retVal['update_num'] = self.update_num
         retVal['complete'] = round(completed / self.length, 2)
-        retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
-        retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
+        if self.type == "VALIDATION":
+            retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
+            retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
         #retVal['brier_score'] = round(self.brier_score.compute().item(), 4)
         retVal['lr'] = lr
         retVal['total_loss'] = round(self.total_loss, 4)
@@ -83,8 +86,9 @@ class Results():
         self.total_loss = 0
         self.perplexity = 0
         self.num_pred = 0
-        self.accuracy.reset()
-        self.calibration_error.reset()
+        if self.type == "VALIDATION":
+            self.accuracy.reset()
+            self.calibration_error.reset()
         #self.brier_score.reset()
         self.update_num += 1
         self.last_update = time

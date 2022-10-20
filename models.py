@@ -90,7 +90,8 @@ class RoformerModel(nn.Module):
 
     def forward(self, inputs):
         inputs = inputs[:, :self.max_position_embeddings]
-        encoding = torch.mean(self.model(inputs).last_hidden_state, dim=1)
+        mask = torch.tensor(inputs!=0, dtype=torch.float)
+        encoding = torch.mean(self.model(inputs, attention_mask=mask).last_hidden_state, dim=1)
         output = self.proj(encoding)
         return F.log_softmax(output, dim=-1)
 
