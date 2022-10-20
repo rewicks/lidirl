@@ -198,9 +198,10 @@ class Trainer():
                 else:
                     self.best_model = validation_results
                     save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
-                save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
-            if args.save_every_epoch:
-                save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
+                if args.checkpoint_last:
+                    save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
+        if args.save_every_epoch:
+            save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
         return 1
 
 
@@ -342,6 +343,7 @@ def parse_args():
     parser.add_argument("--min_epochs", type=int, default=25)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--save_every_epoch", action="store_true", default=False)
+    parser.add_argument("--checkpoint_last", action="store_true", default=False)
 
     parser.add_argument("--update_interval", type=int, default=1)
     parser.add_argument('--log_interval', type=int, default=1000)
