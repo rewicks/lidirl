@@ -133,7 +133,12 @@ class Trainer():
 
         self.criterion = nn.NLLLoss()
         self.lr = args.lr
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.warmup_lr = args.warmup_lr
+        if args.warmup_lr is not None and args.warmup_updates is not None:
+            self.warmup_updates = args.warmup_updates
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.warmup_lr)
+        else:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1.0, gamma=0.95)
 
         total_params = sum([p.numel() for p in self.model.parameters()])
@@ -170,6 +175,10 @@ class Trainer():
                 ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
             self.results.calculate(loss.item(), ppl, probs, labels)
+
+            if args.warmup_updates is not None and batch_index / args.update_interval == args.warmup_updates:
+                for g in self.optimizer.param_groups:
+                    g['lr'] = self.lr
 
             if batch_index % args.update_interval == 0:
                 self.optimizer.zero_grad()
@@ -337,6 +346,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=2000)
     parser.add_argument("--tb_dir", type=str, default=None)
 
+    parser.add_argument('--warmup_lr', type=float, default=None)
+    parser.add_argument('--warmup_updates', type=int, default=None)
+
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--embedding_dim", type=int, default=256)
     parser.add_argument("--hidden_dim", type=int, default=256)
@@ -401,7 +413,7 @@ def main(args):
         epoch_finish = trainer.run_epoch(args, ep)
         trainer.scheduler.step()
 
-    for ep in range(args.min_epochs, args.max_epochs):
+    for ep in range(args.min_epochs, argxs.max_epochs):
         logger.info(f"Beginning epoch {ep}")
         epoch_finish = trainer.run_epoch(args, ep)
         if epoch_finish == 0:
