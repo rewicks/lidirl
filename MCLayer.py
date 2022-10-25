@@ -636,7 +636,7 @@ class MCSoftmaxDenseFA(MCSoftmaxOutputLayerBase):
                         dtype=diag_scale.dtype))
 
         torch.manual_seed(seed)
-        diag_noise_samples = dist.sample((num_samples,))
+        diag_noise_samples = dist.sample((num_samples,)).to(diag_scale.device)
 
         # dist.sample(total_mc_samples) returns Tensor of shape
         # [total_mc_samples, batch_size, d], here we reshape to
@@ -669,7 +669,7 @@ class MCSoftmaxDenseFA(MCSoftmaxOutputLayerBase):
                         dtype=factor_loadings.dtype))
 
         torch.manual_seed(seed)
-        standard_normal_samples = dist.sample((num_samples,))
+        standard_normal_samples = dist.sample((num_samples,)).to(factor_loadings.device)
 
         # dist.sample(total_mc_samples) returns Tensor of shape
         # [total_mc_samples, batch_size, d], here we reshape to
