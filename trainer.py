@@ -150,6 +150,7 @@ class Trainer():
 
         self.best_model = None
         self.results = Results(time.time(), length=len(self.train_dataset), device=self.device)
+        self.is_warm = False
         logger.info(args)
 
     def run_epoch(self, args, epoch=0):
@@ -177,9 +178,10 @@ class Trainer():
 
             self.results.calculate(loss.item(), ppl, probs, labels)
 
-            if args.warmup_updates is not None and batch_index / args.update_interval == args.warmup_updates:
+            if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
                 for g in self.optimizer.param_groups:
                     g['lr'] = self.lr
+                self.iswarm = True
 
             if batch_index % args.update_interval == 0:
                 self.optimizer.zero_grad()
