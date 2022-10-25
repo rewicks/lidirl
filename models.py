@@ -1,3 +1,4 @@
+from cProfile import label
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
@@ -5,13 +6,15 @@ import torchvision
 # import json
 import math
 from transformers import RoFormerModel, RoFormerConfig
+from MCLayer import MCSoftmaxDenseFA
 
 class CLD3Model(nn.Module):
     def __init__(self, vocab_size,
                         embedding_dim,
                         hidden_dim,
                         label_size,
-                        num_ngram_orders):
+                        num_ngram_orders,
+                        montecarlo_layer=False):
         super(CLD3Model, self).__init__()
         self.vocab_size = vocab_size
         self.num_ngram_orders = num_ngram_orders
@@ -20,7 +23,11 @@ class CLD3Model(nn.Module):
         self.label_size = label_size
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.hidden_layer = nn.Linear(embedding_dim*num_ngram_orders, hidden_dim)
-        self.softmax_layer = nn.Linear(hidden_dim, label_size)
+        self.montecarlo_layer = montecarlo_layer
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(hidden_dim, label_size)
 
     def forward(self, inputs):
 
@@ -34,7 +41,7 @@ class CLD3Model(nn.Module):
         inputs = torch.mean(inputs, dim=2)
         embed = inputs.view(inputs.shape[0], -1)
         hidden = self.hidden_layer(embed)
-        output = F.log_softmax(self.softmax_layer(hidden), dim=-1)
+        output = F.log_softmax(self.proj(hidden), dim=-1)
         return output
 
     def save_object(self):
@@ -44,7 +51,8 @@ class CLD3Model(nn.Module):
             "num_ngram_orders": self.num_ngram_orders,
             "embedding_dim": self.embedding_dim,
             "hidden_dim": self.hidden_dim,
-            "label_size": self.label_size
+            "label_size": self.label_size,
+            "montecarlo_layer": self.montecarlo_layer
         }
         return save
 
@@ -58,7 +66,8 @@ class RoformerModel(nn.Module):
                     num_layers,
                     max_len,
                     nhead=8,
-                    dropout=0.1
+                    dropout=0.1,
+                    montecarlo_layer = False
                     ):
         super(RoformerModel, self).__init__()
         self.config = RoFormerConfig(
@@ -84,9 +93,13 @@ class RoformerModel(nn.Module):
         self.attention_probs_dropout_prob = dropout
         self.max_position_embeddings = max_len
         self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
 
         self.model = RoFormerModel(self.config)
-        self.proj = nn.Linear(hidden_dim, label_size)
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(hidden_dim, label_size)
 
     def forward(self, inputs):
         inputs = inputs[:, :self.max_position_embeddings]
@@ -105,7 +118,8 @@ class RoformerModel(nn.Module):
             "nhead" : self.num_attention_heads,
             "dropout": self.hidden_dropout_prob,
             "max_len": self.max_position_embeddings,
-            "label_size": self.label_size
+            "label_size": self.label_size,
+            "montecarlo_layer": self.montecarlo_layer
         }
         return save
 
@@ -116,14 +130,19 @@ class TransformerModel(nn.Module):
                     label_size,
                     num_layers,
                     max_len,
-                    nhead=8
+                    nhead=8,
+                    montecarlo_layer = False
                     ):
         super(TransformerModel, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.pos_embed = PositionalEncoding(embed_size=embedding_dim, max_len=max_len)
         self.embed = nn.Embedding(vocab_size, embedding_dim)
-        self.proj = nn.Linear(embedding_dim, label_size)
+        self.montecarlo_layer = montecarlo_layer
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(embedding_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(embedding_dim, label_size)
 
         self.vocab_size = vocab_size
         self.embedding_size = embedding_dim
@@ -153,7 +172,8 @@ class TransformerModel(nn.Module):
             "label_size": self.label_size,
             "num_layers": self.num_layers,
             "max_length": self.max_length,
-            "nhead": self.nhead
+            "nhead": self.nhead,
+            "montecarlo_layer": self.montecarlo_layer
         }
         return save
 
@@ -181,7 +201,8 @@ class ConvModel(nn.Module):
                     embedding_dim=256,
                     conv_min_width=2,
                     conv_max_width=5,
-                    conv_depth=64):
+                    conv_depth=64,
+                    montecarlo_layer=False):
         super(ConvModel, self).__init__()
         self.vocab_size = vocab_size
         self.label_size = label_size
@@ -196,7 +217,11 @@ class ConvModel(nn.Module):
             nn.Conv1d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=width) for width in range(conv_min_width, conv_max_width)
         ])
 
-        self.proj = nn.Linear(embedding_dim, label_size)
+        self.montecarlo_layer = montecarlo_layer
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(embedding_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(embedding_dim, label_size)
 
     def forward(self, inputs):
         embed = self.embed(inputs).transpose(1,2)
@@ -218,6 +243,7 @@ class ConvModel(nn.Module):
             "label_size": self.label_size,
             "conv_min_width": self.conv_min_width,
             "conv_max_width": self.conv_max_width,
+            "montecarlo_layer": self.montecarlo_layer
         }
         return save
 

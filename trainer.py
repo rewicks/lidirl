@@ -150,6 +150,7 @@ class Trainer():
 
         self.best_model = None
         self.results = Results(time.time(), length=len(self.train_dataset), device=self.device)
+        logger.info(args)
 
     def run_epoch(self, args, epoch=0):
         completed = 0
@@ -280,14 +281,16 @@ def build_model(args, dataset):
                                     hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
                                     label_size=len(dataset.labels.keys()),
-                                    num_ngram_orders=len(ngram_orders))
+                                    num_ngram_orders=len(ngram_orders),
+                                    montecarlo_layer=args.montecarlo_layer)
     elif args.model == "transformer":
         model = TransformerModel(vocab_size=len(dataset.vocab),
                                     embedding_dim=args.embedding_dim,
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
                                     max_len=args.max_length,
-                                    nhead=args.nhead)
+                                    nhead=args.nhead,
+                                    montecarlo_layer=args.montecarlo_layer)
     elif args.model == "roformer":
         model = RoformerModel(vocab_size=len(dataset.vocab),
                                     embedding_dim=args.embedding_dim,
@@ -296,19 +299,22 @@ def build_model(args, dataset):
                                     num_layers=args.num_layers,
                                     max_len=args.max_length,
                                     nhead=args.nhead,
-                                    dropout=args.dropout)
+                                    dropout=args.dropout,
+                                    montecarlo_layer=args.montecarlo_layer)
     elif args.model == "convolutional":
         model = ConvModel(vocab_size=len(dataset.vocab),
                             label_size=len(dataset.labels.keys()),
                             embedding_dim=args.embedding_dim,
                             conv_min_width=args.conv_min_width,
                             conv_max_width=args.conv_max_width,
-                            conv_depth=args.conv_depth)
+                            conv_depth=args.conv_depth,
+                            montecarlo_layer=args.montecarlo_layer)
 
     elif args.model == "unet":
         model = UNETModel(vocab_size=len(dataset.vocab),
                             label_size=len(dataset.labels.keys()),
                             embed_size=args.embedding_dim,
+                            montecarlo_layer=args.montecarlo_layer
         )
 
     return model
@@ -367,6 +373,7 @@ def parse_args():
     parser.add_argument("--validation_threshold", type=int, default=10)
 
     parser.add_argument("--num-layers", default=3, type=int) # need to add this to linear
+    parser.add_argument("--montecarlo_layer", default=False, action="store_true")
 
     subparsers = parser.add_subparsers(help="Determines the type of model to be built and trained", dest="model")
     
