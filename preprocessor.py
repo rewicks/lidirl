@@ -180,7 +180,12 @@ class PaddedProcessor(Processor):
 
     def process_labels(self, labels, device):
         if len(labels.shape) == 1:
-            return torch.tensor([[l for _ in range(self.pad_length)] for l in labels]).to(device)
+            retVal = []
+            for l in labels:
+                retVal.append([])
+                for _ in range(self.pad_length):
+                    retVal[-1].append(l)
+            return torch.tensor(retVal).to(device)
         return labels
 
     def __call__(self, text, labels, device):
@@ -213,13 +218,19 @@ class NGramProcessor(Processor):
             ngrams = self.extract_ngrams(instance)
             hashed_ngrams = self.hash_ngrams(ngrams)
 
-            ngrams = [[] for n in hashed_ngrams]
-            weights = [[] for n in hashed_ngrams]
+            ngrams = []
+            weights = []
+            for _ in hashed_ngrams:
+                ngrams.append([])
+                weights.append([])
 
             for idx, ngram_order in enumerate(hashed_ngrams):
                 for tok_idx, _ in enumerate(ngram_order):
-                    hash_ids = [h for h, _ in hashed_ngrams[idx][tok_idx]]
-                    ngram_weights = [w for _, w in hashed_ngrams[idx][tok_idx]]
+                    hash_ids = []
+                    ngram_weights = []
+                    for h, w in hashed_ngrams[idx][tok_idx]:
+                        hash_ids.append(h)
+                        ngram_weights.append(w)
                     ngrams[idx].append(hash_ids)
                     weights[idx].append(ngram_weights)
                 max_size = max(max_size, max([len(n) for n in ngrams]))
