@@ -150,7 +150,7 @@ class Trainer():
 
         self.best_model = None
         self.results = Results(time.time(), length=len(self.train_dataset), device=self.device)
-        self.is_warm = False
+        self.iswarm = False
         logger.info(args)
 
     def run_epoch(self, args, epoch=0):
@@ -179,6 +179,7 @@ class Trainer():
             self.results.calculate(loss.item(), ppl, probs, labels)
 
             if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
+                logger.info(f"Model is warmed up. Now changing learning rate to {self.lr}")
                 for g in self.optimizer.param_groups:
                     g['lr'] = self.lr
                 self.iswarm = True
@@ -191,7 +192,7 @@ class Trainer():
                 running_loss = 0
 
             if batch_index % args.log_interval == 0:
-                logger.info(json.dumps(self.results.get_results(self.scheduler.get_last_lr()[0], completed=completed)))
+                logger.info(json.dumps(self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)))
                 self.results.reset(time.time())
 
             if batch_index % args.validation_interval == 0:
@@ -250,7 +251,7 @@ class Trainer():
                 valid_results.calculate(loss.item(), ppl, probs, labels)
 
         self.model.train()
-        ret_results = valid_results.get_results(self.scheduler.get_last_lr()[0])
+        ret_results = valid_results.get_results(self.optimizer.param_groups[0]['lr'])
         ret_results["validation_num"] = validation_num
         return ret_results
 

@@ -191,9 +191,9 @@ class MCSoftmaxOutputLayerBase(nn.Module):
         latents = locs + noise_samples
         temperature = self._get_temperature()
         if self._num_classes == 2:
-            return F.sigmoid(latents/temperature)
+            return F.sigmoid(latents/temperature, dim=-1)
         else:
-            return F.softmax(latents/temperature)
+            return F.softmax(latents/temperature, dim=-1)
 
     def _compute_predictive_mean(self, locs, scale, total_mc_samples, seed):
         """Utility function to compute the estimated predictive distribution.
