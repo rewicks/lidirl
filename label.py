@@ -23,7 +23,8 @@ def load_from_checkpoint(checkpoint_path):
                             embedding_dim=model_dict['embedding_dim'],
                             hidden_dim=model_dict['hidden_dim'],
                             label_size=model_dict['label_size'],
-                            num_ngram_orders=model_dict['num_ngram_orders'])
+                            num_ngram_orders=model_dict['num_ngram_orders'],
+                            montecarlo_layer=model_dict['montecarlo_layer'])
         processor = NGramProcessor(
             ngram_orders=model_dict['processor']['ngram_orders'],
             num_hashes=model_dict['processor']['num_hashes'],
@@ -36,7 +37,8 @@ def load_from_checkpoint(checkpoint_path):
             label_size=model_dict["label_size"],
             num_layers=model_dict["num_layers"],
             max_len=model_dict["max_length"],
-            nhead=model_dict["nhead"]
+            nhead=model_dict["nhead"],
+            montecarlo_layer=model_dict['montecarlo_layer']
         )    
         processor = Processor()
     elif model_dict["model_type"] == "roformer":
@@ -48,7 +50,8 @@ def load_from_checkpoint(checkpoint_path):
                     num_layers=model_dict["num_layers"],
                     max_len=model_dict["max_len"],
                     nhead=model_dict["nhead"],
-                    dropout=model_dict["dropout"]
+                    dropout=model_dict["dropout"],
+                    montecarlo_layer=model_dict['montecarlo_layer']
         )
         processor = Processor()
     elif model_dict["model_type"] == "convolutional":
@@ -56,7 +59,8 @@ def load_from_checkpoint(checkpoint_path):
                             label_size=model_dict["label_size"],
                             embedding_dim=model_dict["embedding_size"],
                             conv_min_width=model_dict["conv_min_width"],
-                            conv_max_width=model_dict["conv_max_width"])
+                            conv_max_width=model_dict["conv_max_width"],
+                            montecarlo_layer=model_dict['montecarlo_layer'])
         processor = Processor()
     model.load_state_dict(model_dict['weights'])
     model.eval()
@@ -119,12 +123,15 @@ class EvalModel():
         data = TrainingShard()
         langid = self.labels.get('<unk>', 0)
         for line in input_file:
-            line = [l for l in line.strip()]
-            text = []
-            for t in line:
-                t = '[SPACE]' if t == ' ' else t
-                text.append(self.vocab.get(t, 0))
-            data.add_example(langid, text)
+            if len(line.strip().split()) > 0:
+                line = [l for l in line.strip()]
+                text = []
+                for t in line:
+                    t = '[SPACE]' if t == ' ' else t
+                    text.append(self.vocab.get(t, 0))
+                data.add_example(langid, text)
+            else:
+                data.add_example(langid, [0 for _ in range(10)])
             # label, hashed_grams = self.preprocessor.process_example(langid, line.strip().split())
             # data.add_example(langid, label, line.strip(), hashed_grams)
         return data
