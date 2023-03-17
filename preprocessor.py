@@ -117,7 +117,7 @@ class TrainingShard():
     def get_batch(self, batch_size=2000, augmentations=None, augmentation_prob=0.0):
         batch = Batch()
         for training_example in self.data:
-            if random.random() < augmentation_prob:
+            if augmentations is not None and random.random() < augmentation_prob:
                 augment = get_augmentation(augmentations)
             else:
                 augment = None

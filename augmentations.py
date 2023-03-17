@@ -1,7 +1,7 @@
 import random
 
 def grab_a_span(text, space_idx):
-    num_words = sum([1 if t == space_idx else 0 for t in text])
+    num_words = sum([1 if t == space_idx else 0 for t in text]) + 1
     if num_words < 4:
         return text
     start_index = random.choice([_ for _ in range(num_words-3)])
@@ -32,7 +32,7 @@ class Short():
         self.space_idx = space_idx
 
     def __call__(self, text):
-        num_words = sum([1 if t == self.space_idx else 0 for t in text])
+        num_words = sum([1 if t == self.space_idx else 0 for t in text]) + 1
         word_index = random.choice([_ for _ in range(num_words)])
         out = []
         index = 0
@@ -55,7 +55,7 @@ class Antspeak(Augmentation):
         self.shorten_when_possible = shorten_when_possible
 
     def __call__(self, text):
-        if self.shorten_when_possible:
+        if random.random() < 0.5:
             text = grab_a_span(text, space_idx=self.space_idx)
         out = []
         for t in text[:-1]:
@@ -74,7 +74,7 @@ class NGrams(Augmentation):
         self.shorten_when_possible = shorten_when_possible
 
     def __call__(self, text):
-        if self.shorten_when_possible:
+        if random.random() < 0.5:
             text = grab_a_span(text, space_idx=self.space_idx)
         out = []
         repeated = False
@@ -132,7 +132,7 @@ class Hashtags(Augmentation):
         return out
         
     def __call__(self, text):
-        num_words = sum([1 if t == self.space_idx else 0 for t in text])
+        num_words = sum([1 if t == self.space_idx else 0 for t in text]) + 1
         if num_words < 4:
             index = 0
         else:
