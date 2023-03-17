@@ -114,9 +114,15 @@ class TrainingShard():
     def shuffle_shard(self):
         random.shuffle(self.data)
 
-    def get_batch(self, batch_size=2000):
+    def get_batch(self, batch_size=2000, augmentations=None, augmentation_prob=0.0):
         batch = Batch()
         for training_example in self.data:
+            if random.random() < augmentation_prob:
+                augment = get_augmentation(augmentations)
+            else:
+                augment = None
+            if augment is not None:
+                training_example = TrainingExample(label = training_example.label, text=augment(training_example.text))
             if batch.size + training_example.size() > batch_size: 
                 yield batch.labels, batch.texts
                 batch = Batch()
@@ -188,8 +194,8 @@ class PaddedProcessor(Processor):
             return torch.tensor(retVal).to(device)
         return labels
 
-    def __call__(self, text, labels, device):
-        return self.process_example(text, device), self.process_labels(labels, device)
+    def __call__(self, text, labels, device, augmentations, augmentation_prob):
+        return self.process_example(text, device, augmentations, augmentation_prob), self.process_labels(labels, device)
 
     def save_object(self):
         return {
@@ -453,6 +459,20 @@ class Dataset():
             for label_batch, text_batch in shard.get_batch(self.batch_size):
                 yield torch.tensor(label_batch, dtype=torch.long), text_batch
 
+    def enumerate(self, augmentations, augmentation_prob):
+        index = 0
+        for shard_path in self.shards:
+            try:
+                shard = TrainingShard()
+                shard.load_object(torch.load(shard_path))
+            except Exception as e:
+                print(e)
+                logger.error(f"Couldn't find processed shard at {shard_path}! Reprocess your data")
+                sys.exit(-1)
+            for label_batch, text_batch in shard.get_batch(self.batch_size, augmentations=augmentations, augmentation_prob=augmentation_prob):
+                yield index, (torch.tensor(label_batch, dtype=torch.long), text_batch)
+                index += 1
+
     def save(self):
         output = {
             "bytes": self.bytes,
@@ -507,6 +527,15 @@ def parse_args():
     return args
 
 
+def get_augmentation(augmentations):
+    p = random.random()
+    for augment, prob in augmentations:
+        if p - prob < 0:
+            return augment
+        p -= prob
+    return augment
+
+
 def main(args):
     # ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
 
@@ -518,7 +547,7 @@ def main(args):
     processed_train_dataset = Dataset(args.output_dir,
                                         max_shard_size=args.max_shard_size,
                                         type="train",
-                                        vocab=None)
+                                        vocab=vocab)
     processed_train_dataset.process_data(args.train_files, temperature=args.temperature)
     processed_train_dataset.save()
 

@@ -9,9 +9,11 @@ import torch.nn.functional as F
 import json
 import torchmetrics.classification as tmc
 import metrics
+import string
 
 from preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
 from models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel
+from augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short
 
 ######################################################################################
 
@@ -109,7 +111,7 @@ def save_model(model, model_type, dataset, processor, output_path, bytes, device
     model = model.to(device)
 
 class Trainer():
-    def __init__(self, args, train, valid, model, processor):
+    def __init__(self, args, train, valid, model, processor, augmentations):
         self.with_cuda = torch.cuda.is_available() and not args.cpu
         self.device = torch.device("cuda:0" if self.with_cuda else "cpu")
         logger.info(f"Training on device: {self.device}")
@@ -130,6 +132,9 @@ class Trainer():
         logger.info(self.model)
 
         self.processor = processor
+        
+        self.augmentations = augmentations
+        self.augmentation_prob = args.augmentation_probability
 
         self.criterion = nn.NLLLoss()
         self.lr = args.lr
@@ -156,7 +161,7 @@ class Trainer():
     def run_epoch(self, args, epoch=0):
         completed = 0
         running_loss = 0
-        for batch_index, (labels, texts) in enumerate(self.train_dataset):
+        for batch_index, (labels, texts) in self.train_dataset.enumerate(self.augmentations, self.augmentation_prob):
             completed += len(labels)
             inputs, labels = self.processor(texts, labels, self.device)
 
@@ -328,7 +333,7 @@ def build_processor(args):
         processor = NGramProcessor(
             ngram_orders=[int(n) for n in args.ngram_orders.split(',')],
             num_hashes=args.num_hashes,
-            max_hash_value=args.max_hash_value
+            max_hash_value=args.max_hash_value,
         )
     elif args.model == "transformer":  
         logger.info("Building a base Processor for a Transformer model") 
@@ -344,6 +349,57 @@ def build_processor(args):
         processor = PaddedProcessor(args.pad_length)     
     
     return processor
+
+def build_augmentations(args, vocab):
+    if args.augmentations is not None:
+        augs = []
+        probs = []
+        punctuation = []
+        capitals = {}
+        lowers = {}
+
+        for v, id in vocab.items():
+            if v in string.punctuation:
+                punctuation.append(id)
+            if v == "[SPACE]":
+                capitals[id] = id
+                lowers[id] = id
+            else:
+                capitals[id] = vocab.get(v.upper(), 0)
+                lowers[id] = vocab.get(v.lower(), 0)
+
+        for aug in args.augmentations.split('/'):
+            aug = aug.split(',')
+            prob = float(aug[1])
+            aug = aug[0]
+            if aug == "antspeak":
+                aug = Antspeak(vocab.get('[SPACE]'))
+            elif aug == "ngrams":
+                aug = NGrams(disallowed_repeats=punctuation,
+                            space_idx=vocab['[SPACE]'])
+            elif aug == "hashtag":
+                aug = Hashtags(hashtag_idx=vocab.get('#', 0), 
+                                    space_idx=vocab['[SPACE]'],
+                                    punctuation=punctuation,
+                                    capitals=capitals,
+                                    lowers=lowers
+                                    )
+            elif aug == "short":
+                aug = Short(space_idx=vocab['[SPACE]'])
+            elif aug == "spongebob":
+                aug = Spongebob(
+                    capitals=capitals,
+                    lowers=lowers
+                )
+            augs.append(aug)
+            probs.append(prob)
+        total_prob_mass = sum(probs)
+        augmentations = []
+        for a, p in zip(augs, probs):
+            augmentations.append((a, p/total_prob_mass))
+        return augmentations
+    return None
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -378,6 +434,9 @@ def parse_args():
     parser.add_argument("--num-layers", default=3, type=int) # need to add this to linear
     parser.add_argument("--montecarlo_layer", default=False, action="store_true")
 
+    parser.add_argument("--augmentations", default=None, type=str)
+    parser.add_argument("--augmentation_probability", default=0.2, type=float)
+
     subparsers = parser.add_subparsers(help="Determines the type of model to be built and trained", dest="model")
     
     linear_parser = subparsers.add_parser("linear-ngram", help="a linear ngram style model")
@@ -401,6 +460,8 @@ def parse_args():
     unet_parser = subparsers.add_parser("unet", help="a unet model")
     unet_parser.add_argument("--pad_length", default=1024, type=int)
 
+
+
     args = parser.parse_args()
 
     return args
@@ -417,7 +478,9 @@ def main(args):
 
     processor = build_processor(args)
 
-    trainer = Trainer(args, train, valid, model, processor)
+    augmentations = build_augmentations(args, train.vocab)
+
+    trainer = Trainer(args, train, valid, model, processor, augmentations)
     for ep in range(args.min_epochs):
         logger.info(f"Beginning epoch {ep}")
         epoch_finish = trainer.run_epoch(args, ep)
