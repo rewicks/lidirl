@@ -123,7 +123,7 @@ class TrainingShard():
                 augment = None
             if augment is not None:
                 training_example = TrainingExample(label = training_example.label, text=augment(training_example.text))
-            if batch.size + training_example.size() > batch_size: 
+            if batch.size > 0 and batch.size + training_example.size() > batch_size: 
                 yield batch.labels, batch.texts
                 batch = Batch()
             batch.add(training_example)
