@@ -8,12 +8,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import json
 import torchmetrics.classification as tmc
-import metrics
 import string
+import pathlib
 
-from preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
-from models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel
-from augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short
+if (__package__ is None or __package__ == "") and __name__ == '__main__':
+    parent = pathlib.Path(__file__).absolute().parents[1]
+    sys.path.insert(0, str(parent))
+    __package__ = 'lidirl'
+
+from . import __version__
+from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
+from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, FlashModel
+from .augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short
+from .metrics import Results
 
 ######################################################################################
 
@@ -23,80 +30,9 @@ logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
     stream=sys.stderr,
 )
-logger = logging.getLogger("langid")
+logger = logging.getLogger("lidirl")
 
 ######################################################################################
-
-class Results():
-    def __init__(self, time, length=1, device=None, type='TRAINING'):
-        self.total_loss = 0
-        self.perplexity = 0
-        self.accuracy = tmc.Accuracy().to(device)
-        self.calibration_error = tmc.CalibrationError(n_bins=10).to(device)
-        #self.brier_score = metrics.BrierScore().to(device)
-        self.num_pred = 0
-        self.update_num = 0
-        self.batches = 0
-        self.length = length
-        self.last_update = time
-        self.start = time
-        self.validations = 0
-        self.type = type
-
-    def calculate(self, loss, ppl, y_hat, labels):
-        self.total_loss += loss
-        self.perplexity += ppl
-        if len(labels.shape) == 2:
-            for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
-                if self.type == "VALIDATION":
-                    self.accuracy.update(y_h, l)
-                    if self.calibration_error.update(y_h, l) == -1:
-                        return -1
-                #self.brier_score.update(y_h, l)
-                self.num_pred += l.shape[0]
-        else:
-            if self.type == "VALIDATION":
-                self.accuracy.update(y_hat, labels)
-                if self.calibration_error.update(y_hat, labels) == -1:
-                    return -1
-            #self.brier_score.update(y_hat, labels)
-            self.num_pred += labels.shape[0]
-        self.batches += 1
-
-    def get_results(self, lr, completed=1):
-        retVal = {}
-        retVal['type'] = self.type
-        retVal['update_num'] = self.update_num
-        retVal['complete'] = round(completed / self.length, 2)
-        if self.type == "VALIDATION":
-            retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
-            retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
-        #retVal['brier_score'] = round(self.brier_score.compute().item(), 4)
-        retVal['lr'] = lr
-        retVal['total_loss'] = round(self.total_loss, 4)
-        retVal['average_loss'] = round(self.total_loss/self.num_pred, 4)
-        retVal['ppl_per_pred'] = round(self.perplexity/self.num_pred, 4)
-        retVal['time_since_last_update'] = round(time.time()-self.last_update, 2)
-        retVal['predictions_per_second'] = round(self.num_pred/retVal['time_since_last_update'])
-        retVal['time_passed'] = round(time.time()-self.start)
-        retVal['validations'] = self.validations
-        retVal['num_pred'] = self.num_pred
-        return retVal
-
-    # add perplexity
-    def reset(self, time):
-        self.total_loss = 0
-        self.perplexity = 0
-        self.num_pred = 0
-        if self.type == "VALIDATION":
-            self.accuracy.reset()
-            self.calibration_error.reset()
-        #self.brier_score.reset()
-        self.update_num += 1
-        self.last_update = time
-
-    def validated(self):
-        self.validations += 1
 
 
 def save_model(model, model_type, dataset, processor, output_path, bytes, device=None, log_output=None):
@@ -117,13 +53,14 @@ class Trainer():
         logger.info(f"Training on device: {self.device}")
 
         self.output_path = args.output_path
-        self.batch_size = args.batch_size
+        self.max_tokens = args.max_tokens
 
         self.train_dataset = train
-        self.train_dataset.set_batch_size(args.batch_size)
+        self.train_dataset.set_batch_size(args.max_tokens)
 
         self.validation_dataset = valid
-        self.validation_dataset.set_batch_size(args.batch_size)
+        for v in self.validation_dataset:
+            v.set_batch_size(args.max_tokens)
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
@@ -154,7 +91,12 @@ class Trainer():
             self.model = self.model.cuda()
 
         self.best_model = None
-        self.results = Results(time.time(), length=len(self.train_dataset), device=self.device)
+
+        # keeps track of all metrics and logging information
+        self.results = Results(time.time(), 
+                                num_labels=len(self.train_dataset.labels),
+                                length=len(self.train_dataset), 
+                                device=self.device)
         self.iswarm = False
         logger.info(args)
 
@@ -229,49 +171,63 @@ class Trainer():
 
 
     def validate(self, args, validation_num=0):
+        ret_results = {}
         self.model.eval()
-        valid_results = Results(time.time(), length=len(self.validation_dataset), device=self.device, type='VALIDATION')
-        with torch.no_grad():
-            for batch_index, (labels, texts) in enumerate(self.validation_dataset):
-                
-                inputs, labels = self.processor(texts, labels, self.device)
-                # labels = labels.to(self.device)
+        for val in self.validation_dataset:
+            valid_results = Results(time.time(), 
+                                        num_labels=len(val.labels),
+                                        length=len(self.validation_dataset),
+                                        device=self.device,
+                                        type='VALIDATION')
+            with torch.no_grad():
+                for batch_index, (labels, texts) in enumerate(self.validation_dataset):
+                    
+                    inputs, labels = self.processor(texts, labels, self.device)
+                    # labels = labels.to(self.device)
 
-                output = self.model(inputs)
+                    output = self.model(inputs)
 
-                if args.model == "unet":
-                    loss = 0
-                    ppl = 0
-                    for i, o, l in zip(inputs.transpose(0, 1), output.transpose(0,1), labels.transpose(0,1)):
-                        if sum(i) == 0:
-                            break
-                        loss += self.criterion(o, l)
-                        ppl += torch.exp(F.cross_entropy(o, l)).item() 
-                else:
-                    loss = self.criterion(output, labels)
-                    ppl = torch.exp(F.cross_entropy(output, labels)).item()
+                    if args.model == "unet":
+                        loss = 0
+                        ppl = 0
+                        for i, o, l in zip(inputs.transpose(0, 1), output.transpose(0,1), labels.transpose(0,1)):
+                            if sum(i) == 0:
+                                break
+                            loss += self.criterion(o, l)
+                            ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                    else:
+                        loss = self.criterion(output, labels)
+                        ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
-                probs = torch.exp(output)
+                    probs = torch.exp(output)
 
-                valid_results.calculate(loss.item(), ppl, probs, labels)
-
-        self.model.train()
-        ret_results = valid_results.get_results(self.optimizer.param_groups[0]['lr'])
+                    valid_results.calculate(loss.item(), ppl, probs, labels)
+            ret_results[val.group_name] = valid_results.get_results(self.optimizer.param_groups[0]['lr'])
         ret_results["validation_num"] = validation_num
+        self.model.train()
         return ret_results
 
 ############################################ BUILDING AND LOADING UTILS ############################################
 
 def load_data(args):
-    if not os.path.exists(args.data_dir):
-        logger.error(f"Data directory at {args.data_dir} does not exist. Please preprocess the data.")
+    if not os.path.exists(args.preprocessed_data_dir):
+        logger.error(f"Data directory at {args.preprocessed_data_dir} does not exist. Please preprocess the data.")
         sys.exit(-1)
     else:
-        train_data =  Dataset(args.data_dir, type="train")
+        train_data =  Dataset(args.preprocessed_data_dir, type="train")
         train_data.load()
 
-        valid_data = Dataset(args.data_dir, type="valid")
-        valid_data.load()
+        valid_data = []
+        for d, s, f in os.walk(args.preprocessed_data_dir):
+            for fi in f:
+                if "valid" in fi:
+                    if len(fi.split(',')) > 2:
+                        group = fi.split(".")[1]
+                    else:
+                        group = None
+                    split = Dataset(args.preprocessed_data_dir, type="valid", group_name=group)
+                    split.load()
+                    valid_data.append(split)
 
     return train_data, valid_data
 
@@ -324,6 +280,19 @@ def build_model(args, dataset):
                             embed_size=args.embedding_dim,
                             montecarlo_layer=args.montecarlo_layer
         )
+    elif args.model == "flash":
+        model = FlashModel(
+            vocab_size=len(dataset.vocab),
+            embedding_dim=args.embedding_dim,
+            hidden_dim=args.hidden_dim,
+            label_size=len(dataset.labels.keys()),
+            num_layers=args.num_layers,
+            max_len=args.max_length,
+            nhead=args.nhead,
+            dropout=args.dropout,
+            montecarlo_layer=args.montecarlo_layer,
+            use_rotary=args.use_rotary,
+        )
 
     return model
 
@@ -340,6 +309,9 @@ def build_processor(args):
         processor = Processor()
     elif args.model == "roformer":
         logger.info("Building a base Processor for a Roformer Model")
+        processor = Processor()
+    elif args.model == "flash":
+        logger.info("Building a base Processor for a Flash Model")
         processor = Processor()
     elif args.model == "convolutional":
         logger.info("Building a base Processor for a Convolutional model") 
@@ -402,61 +374,164 @@ def build_augmentations(args, vocab):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", required=True, type=str)
-    parser.add_argument("--output_path", required=True, type=str)
+    parser = argparse.ArgumentParser(
+        description="TRAINER: something something something.\n"
+        "      Example: something",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
 
-    parser.add_argument("--checkpoint_path", type=str, default=None)
+    parser.add_argument("--raw_data_dir", 
+                                        type=str, 
+                                        help="The path to raw data. If this is passed, data directory must have a train and valid subfolder.")
+    parser.add_argument("--preprocessed_data_dir",
+                                        type=str,
+                                        help="The path to the directory where the data is located. This must be the output of the preprocess call")
+    parser.add_argument("--output_path", 
+                                        required=True,
+                                        type=str,
+                                        help="The path to the directory will output models will be saved")
 
-    parser.add_argument("--batch_size", type=int, default=2000)
-    parser.add_argument("--tb_dir", type=str, default=None)
+    parser.add_argument("--checkpoint_path",
+                                        type=str,
+                                        default=None,
+                                        help="The checkpoint file to continue training from.")
 
-    parser.add_argument('--warmup_lr', type=float, default=None)
-    parser.add_argument('--warmup_updates', type=int, default=None)
+    parser.add_argument("--max_tokens", 
+                                        type=int,
+                                        default=2000,
+                                        help="The batch size in tokens")
+    parser.add_argument("--tb_dir", 
+                                        type=str,
+                                        default=None,
+                                        help="The directory path to save tensorboard files")
 
-    parser.add_argument("--lr", type=float, default=0.0001)
-    parser.add_argument("--embedding_dim", type=int, default=256)
-    parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument('--warmup_lr', 
+                                        type=float,
+                                        default=None,
+                                        help="The LR to use during the warmup updates")
+    parser.add_argument('--warmup_updates',
+                                        type=int,
+                                        default=None,
+                                        help="The number of updates to warm up (different learning rate)")
 
-    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--lr", 
+                                type=float,
+                                default=0.0001,
+                                help="The learning rate to use")
+    parser.add_argument("--embedding_dim",
+                                type=int,
+                                default=256,
+                                help="The size of the embedding dimension")
+    parser.add_argument("--hidden_dim", 
+                                type=int, 
+                                default=256,
+                                help="The size of the hidden dimension.")
+    parser.add_argument("--dropout", 
+                                type=float, 
+                                default=0.1,
+                                help="Dropout percent to use for regularization")
 
-    parser.add_argument("--min_epochs", type=int, default=25)
-    parser.add_argument("--max_epochs", type=int, default=100)
-    parser.add_argument("--save_every_epoch", action="store_true", default=False)
-    parser.add_argument("--checkpoint_last", action="store_true", default=False)
+    parser.add_argument("--cpu", 
+                                action="store_true",
+                                help="Forces use of cpu even if CUDA is available.")
 
-    parser.add_argument("--update_interval", type=int, default=1)
-    parser.add_argument('--log_interval', type=int, default=1000)
-    parser.add_argument('--validation_interval', type=int, default=25000)
-    parser.add_argument("--validation_threshold", type=int, default=10)
+    parser.add_argument("--min_epochs", 
+                                type=int, 
+                                default=25,
+                                help="Minimum number of epochs to train for.")
+    parser.add_argument("--max_epochs", 
+                                type=int,
+                                default=100,
+                                help="Maximum number of epochs to train for.")
+    parser.add_argument("--save_every_epoch",
+                                action="store_true",
+                                default=False,
+                                help="If true, saves a model after each epoch")
+    parser.add_argument("--checkpoint_last",
+                                action="store_true",
+                                default=False,
+                                help="If true, saves the last model separate from best model.")
 
-    parser.add_argument("--num-layers", default=3, type=int) # need to add this to linear
-    parser.add_argument("--montecarlo_layer", default=False, action="store_true")
+    parser.add_argument("--update_interval",
+                                type=int,
+                                default=1,
+                                help="Backprops every N updates")
+    parser.add_argument('--log_interval',
+                                type=int,
+                                default=1000,
+                                help="Waits N updates to log information")
+    parser.add_argument('--validation_interval',
+                                type=int,
+                                default=25000,
+                                help="Waits N updates to validate")
+    parser.add_argument("--patience",
+                                type=int,
+                                default=-1,
+                                help="If loss has not improved in N validations, stops training early.")
 
-    parser.add_argument("--augmentations", default=None, type=str)
-    parser.add_argument("--augmentation_probability", default=0.2, type=float)
+    parser.add_argument("--num-layers",
+                                default=3,
+                                type=int,
+                                help="The number of layers to use in model.") # need to add this to linear
+    parser.add_argument("--montecarlo_layer",
+                                default=False,
+                                action="store_true",
+                                help="If true, uses a MonteCarlo Layer instead of typical projection layer.")
 
+    parser.add_argument("--augmentations", 
+                                default=None,
+                                type=str,
+                                help="A comma separated list of augmentation (names) and their ratios.")
+    parser.add_argument("--augmentation_probability",
+                                default=0.2,
+                                type=float,
+                                help="The probability of augmenting data.")
+
+    parser.add_argument("--wandb_proj", default=None, type=str, help="The project where this run will be logged")
+    parser.add_argument("--wandb_run", default=None, type=str, help="The name of the run for wandb logging")
+
+    # A switch for which model architecture to use
     subparsers = parser.add_subparsers(help="Determines the type of model to be built and trained", dest="model")
     
-    linear_parser = subparsers.add_parser("linear-ngram", help="a linear ngram style model")
-    linear_parser.add_argument("--ngram_orders", default="1,2,3", type=str)
-    linear_parser.add_argument("--max_hash_value", default=128, type=int)
-    linear_parser.add_argument("--num_hashes", default=1, type=int)
+    # SUBPARSER FOR THE LINEAR NGRAM BASED MODEL (SIMILAR TO CLD3)
+    linear_parser = subparsers.add_parser("linear-ngram", 
+                                                help="a linear ngram style model")
+    linear_parser.add_argument("--ngram_orders", 
+                                    default="1,2,3", 
+                                    type=str,
+                                    help="A comma separated list of character n-gram orders to extract from data")
+    linear_parser.add_argument("--max_hash_value",
+                                    default=128,
+                                    type=int,
+                                    help="Max hash value when embedding the n-grams")
+    linear_parser.add_argument("--num_hashes",
+                                    default=1,
+                                    type=int,
+                                    help="How many distinct hashes to use")
 
+    # A SUBPARSER FOR THE TRANSFORMER (STANDARD) MODEL
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
     transformer_parser.add_argument("--nhead", default=8, type=int)
 
+    # A SUBPARSER FOR THE ROFORMER MODEL
     roformer_parser = subparsers.add_parser("roformer", help="a roformer model")
     roformer_parser.add_argument("--max-length", default=1024, type=int)
     roformer_parser.add_argument("--nhead", default=8, type=int)
 
+    # A SUBPARSER FOR THE CONVOLUTIONAL MODEL
     conv_parser = subparsers.add_parser("convolutional", help="a convolutional model")
     conv_parser.add_argument("--conv_min_width", default=2, type=int)
     conv_parser.add_argument("--conv_max_width", default=5, type=int)
     conv_parser.add_argument("--conv_depth", default=64, type=int)
 
+    # A SUBPARSER FOR THE FLASH (TESTING) MODEL
+    flash_parser = subparsers.add_parser("flash", help="the new flash model (for testing)")
+    flash_parser.add_argument("--max-length", default=1024, type=int)
+    flash_parser.add_argument("--nhead", default=8, type=int)
+    flash_parser.add_argument("--use_rotary", default=False, action="store_true")
+
+    # A SUBPARSER FOR THE UNET MODEL
     unet_parser = subparsers.add_parser("unet", help="a unet model")
     unet_parser.add_argument("--pad_length", default=1024, type=int)
 

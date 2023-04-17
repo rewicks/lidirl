@@ -1,3 +1,29 @@
+#!/usr/bin/env python3
+
+"""
+    The monte carlo layer. This is ported from other authors' code (see below). I'm not commenting this further :D.
+"""
+
+################################ PACKAGING AND LOGGING ################################
+import pathlib
+import logging
+import os, sys
+
+if __package__ is None and __name__ == '__main__':
+    parent = pathlib.Path(__file__).absolute().parents[1]
+    sys.path.insert(0, str(parent))
+    __package__ = 'lidirl'
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=os.environ.get("LOGLEVEL", "INFO").upper(),
+    stream=sys.stderr,
+)
+logger = logging.getLogger("lidirl")
+
+#################################### FUNCTIONALITY ####################################
+
 # port to pytorch of these authors' code
 
 # coding=utf-8
@@ -24,14 +50,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
 from torch.distributions.gumbel import Gumbel
-# import tensorflow as tf
-# import tensorflow_probability as tfp
 
 MIN_SCALE_MONTE_CARLO = 1e-3
 TEMPERATURE_LOWER_BOUND = 0.3
 TEMPERATURE_UPPER_BOUND = 3.0
 
-# seed = 14
 
 def compute_temperature(pre_sigmoid_temperature, lower: Optional[float],
                         upper: Optional[float]):
