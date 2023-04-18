@@ -19,6 +19,7 @@ logger = logging.getLogger("lidirl")
 
 #################################### FUNCTIONALITY ####################################
 from typing import Dict
+import json
 
 from . import __version__
 
@@ -48,7 +49,7 @@ class TrainingLogger():
 
     def log(self, out_json):
         if self.stdout:
-            logger.info(out_json)
+            logger.info(json.dumps(out_json))
         if self.use_wandb:
             wandb.log(out_json, commit=True)
 

@@ -22,6 +22,7 @@ from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
 from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, FlashModel
 from .augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short
 from .metrics import Results
+from .logger import TrainingLogger
 
 ######################################################################################
 
@@ -101,6 +102,13 @@ class Trainer():
         self.iswarm = False
         logger.info(args)
 
+        wandb_config = {
+            "project_name": args.wandb_proj,
+            "run_name": args.wandb_run
+        }
+        self.train_log = TrainingLogger(stdout=True,
+                                            wandb_config=wandb_config)
+
     def run_epoch(self, args, epoch=0):
         completed = 0
         running_loss = 0
@@ -140,12 +148,15 @@ class Trainer():
                 running_loss = 0
 
             if batch_index % args.log_interval == 0:
-                logger.info(json.dumps(self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)))
+                batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)
+                self.train_log(batch_results)
+                # logger.info(json.dumps(self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)))
                 self.results.reset(time.time())
 
             if batch_index % args.validation_interval == 0:
                 validation_results = self.validate(args, validation_num = self.results.validations)
-                logger.info(json.dumps(validation_results))
+                self.train_log.log(validation_results)
+                # logger.info(json.dumps(validation_results))
                 self.results.validated()
                 if self.best_model is not None:
                     if validation_results['accuracy'] > self.best_model['accuracy']:
