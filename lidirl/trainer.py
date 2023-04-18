@@ -10,6 +10,7 @@ import json
 import torchmetrics.classification as tmc
 import string
 import pathlib
+from statistics import mean
 
 if (__package__ is None or __package__ == "") and __name__ == '__main__':
     parent = pathlib.Path(__file__).absolute().parents[1]
@@ -172,6 +173,8 @@ class Trainer():
 
     def validate(self, args, validation_num=0):
         ret_results = {}
+        accs = []
+        losses = []
         self.model.eval()
         for val in self.validation_dataset:
             valid_results = Results(time.time(), 
@@ -180,7 +183,7 @@ class Trainer():
                                         device=self.device,
                                         type='VALIDATION')
             with torch.no_grad():
-                for batch_index, (labels, texts) in enumerate(self.validation_dataset):
+                for batch_index, (labels, texts) in enumerate(val):
                     
                     inputs, labels = self.processor(texts, labels, self.device)
                     # labels = labels.to(self.device)
@@ -203,7 +206,11 @@ class Trainer():
 
                     valid_results.calculate(loss.item(), ppl, probs, labels)
             ret_results[val.group_name] = valid_results.get_results(self.optimizer.param_groups[0]['lr'])
+            accs.append(ret_results[val.group_name]["accuracy"])
+            losses.append(ret_results[val.group_name]["total_loss"])
         ret_results["validation_num"] = validation_num
+        ret_results["accuracy"] = mean(accs)
+        ret_results["total_loss"] = mean(losses)
         self.model.train()
         return ret_results
 
@@ -221,7 +228,7 @@ def load_data(args):
         for d, s, f in os.walk(args.preprocessed_data_dir):
             for fi in f:
                 if "valid" in fi:
-                    if len(fi.split(',')) > 2:
+                    if len(fi.split('.')) > 2:
                         group = fi.split(".")[1]
                     else:
                         group = None

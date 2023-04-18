@@ -391,7 +391,7 @@ class Dataset():
         # counts the total number of examples
         total = sum(class_counts.values())
 
-        if self.type == "training":
+        if self.type == "train":
 
             # keep track of sampling probabilities after adjusted temperature
             class_probabilities = {}
@@ -417,7 +417,7 @@ class Dataset():
 
 
         # figure out the number of shards (new shuffled files) to be created
-        num_shards = (total // self.max_shard_size) + 1
+        num_shards = int(total // self.max_shard_size) + 1
         shards = [open(os.path.join(TMP_DIR, f"{self.type}.shard_{n}"), 'w') for n in range(num_shards)]
         logger.info(f"Using {num_shards} shards for {self.type} due to max shard size of {self.max_shard_size}")
 
@@ -485,7 +485,10 @@ class Dataset():
                         
                         shard.add_example(label, text)
             shard.shuffle_shard()
-            OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.shard_{shard_id}.bin")
+            if self.group_name is None:
+                OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.shard_{shard_id}.bin")
+            else:
+                OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.{self.group_name}.shard_{shard_id}.bin")
             torch.save(shard.save_object(), OUTPUT_PATH)
             self.shards.append(OUTPUT_PATH)
 
@@ -548,7 +551,10 @@ class Dataset():
 
 
     def load(self):
-        input_path = os.path.join(self.working_dir, f"{self.type}.json")
+        if self.group_name is not None:
+            input_path = os.path.join(self.working_dir, f"{self.type}.{self.group_name}.json")
+        else:
+            input_path = os.path.join(self.working_dir, f"{self.type}.json")
         state = json.load(open(input_path))
         self.bytes = state["labels"]
         self.working_dir = state["working_dir"]
@@ -639,17 +645,16 @@ def main(args):
 
         }
         for fi in args.valid_files:
-            path = pathlib.Path(fi())
-            parent_path = path.parent.absolute()
+            parent_path = os.path.abspath(fi).split('/')[-2]
             clusters[parent_path] = clusters.get(parent_path, []) + [fi]
-        for cluster, valid_files in clusters:
+        for cluster, valid_files in clusters.items():
             processed_valid_dataset = Dataset(args.output_dir,
                                                 max_shard_size=args.max_shard_size,
                                                 type="valid",
                                                 group_name=cluster,
                                                 vocab=processed_train_dataset.vocab)
             processed_valid_dataset.set_labels(processed_train_dataset.labels)
-            processed_valid_dataset.process_data(args.valid_files)
+            processed_valid_dataset.process_data(valid_files)
             processed_valid_dataset.save()
     else:
         processed_valid_dataset = Dataset(args.output_dir,

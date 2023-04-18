@@ -26,7 +26,6 @@ logger = logging.getLogger("lidirl")
 #################################### FUNCTIONALITY ####################################
 import math
 
-import roformer
 import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
@@ -490,6 +489,8 @@ class TranformerLayer(nn.Module):
         self.d_head = d_model // nhead
         # self.max_seq_len = model_config.max_seq_len
 
+        self.batch_first = batch_first
+        
         # Attention
         self.q = nn.Linear(
             in_features=d_model,
@@ -541,15 +542,17 @@ class TranformerLayer(nn.Module):
         src_key_padding_mask: torch.Tensor,
         is_causal: bool = False
     ):
-        src_key_padding_mask = _canonical_mask(
+        if not self.batch_first:
+            src = src.transpose(0, 1)
+        src_key_padding_mask = F._canonical_mask(
             mask=src_key_padding_mask,
             mask_name="src_key_padding_mask",
-            other_type=_none_or_dtype(src_mask),
+            other_type=F._none_or_dtype(src_mask),
             other_name="src_mask",
             target_type=src.dtype
         )
 
-        src_mask = _canonical_mask(
+        src_mask = F._canonical_mask(
             mask=src_mask,
             mask_name="src_mask",
             other_type=None,
@@ -557,13 +560,19 @@ class TranformerLayer(nn.Module):
             target_type=src.dtype,
             check_other=False,
         )
+        pad_mask, mask_type = self.merge_masks(src_mask, src_key_padding_mask, src)
+        if mask_type == 1:
+            bsz = src.shape[1]
+            pad_mask = pad_mask.view(-1, 1, bsz, 1).expand(-1, self.nheads, -1, bsz) 
 
-
-        pad_mask, _ = self.merge_masks(src_mask, src_key_padding_mask, src)
-
+        #pad_mask = pad_mask.bool()
+        
         x = src
         x = x + self._att_block(self.norm1(x), pad_mask, is_causal=is_causal)
         x = x + self._ff_block(self.norm2(x))
+
+        if not self.batch_first:
+            x = x.transpose(0,1)
 
         return x
 
@@ -572,18 +581,19 @@ class TranformerLayer(nn.Module):
     ):
         batch_size, seq_len, _ = x.shape
         xq, xk, xv = self.q(x), self.k(x), self.v(x)
-
+        # Reshape for rotary embeddings
+        xq = xq.view(batch_size, seq_len, self.nheads, self.d_head)
+        xk = xk.view(batch_size, seq_len, self.nheads, self.d_head)
+        xv = xv.view(batch_size, seq_len, self.nheads, self.d_head)
+ 
         if self.use_rotary:
-            # Reshape for rotary embeddings
-            xq = xq.view(batch_size, seq_len, self.nheads, self.d_head)
-            xk = xk.view(batch_size, seq_len, self.nheads, self.d_head)
-            xv = xv.view(batch_size, seq_len, self.nheads, self.d_head)
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=self.freqs_cis[:seq_len])
 
-            # Reshape for attention calculation: (b_sz, n_head, s_len, d_head)
-            xq = xq.transpose(1, 2)
-            xk = xk.transpose(1, 2)
-            xv = xv.transpose(1, 2)
+        # Reshape for attention calculation: (b_sz, n_head, s_len, d_head)
+        xq = xq.transpose(1, 2)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
 
         # Required as we are not using a nn.Dropout layer
         if self.training:
@@ -591,13 +601,14 @@ class TranformerLayer(nn.Module):
         else:
             att_dropout = 0.0
 
+
         # Using beta torch functionality (subject to change)
         # See - https://shorturl.at/jtI17
         att = F.scaled_dot_product_attention(
             query=xq,
             key=xk,
             value=xv,
-            attn_mask=pad_mask,
+            #attn_mask=pad_mask,
             dropout_p=att_dropout,
             is_causal=is_causal,
         )
@@ -631,20 +642,27 @@ class TranformerLayer(nn.Module):
         mask_type: Optional[int] = None
         merged_mask: Optional[Tensor] = None
 
-        if attn_mask is not None:
-            mask_type = 0
-            merged_mask = attn_mask
         if key_padding_mask is not None:
             mask_type = 1
             merged_mask = key_padding_mask
-        if (attn_mask is not None) and (key_padding_mask is not None):
+
+        if attn_mask is not None:
             # In this branch query can't be a nested tensor, so it has a shape
             batch_size, seq_len, _ = query.shape
             mask_type = 2
-            key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len) \
-                                                        .expand(-1, self.num_heads, -1, -1)
-            attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(batch_size, self.num_heads, -1, -1)
-            merged_mask = attn_mask_expanded + key_padding_mask_expanded
+
+            # Always expands attn_mask to 4D
+            if attn_mask.dim() == 3:
+                attn_mask_expanded = attn_mask.view(batch_size, -1, seq_len, seq_len)
+            else:  # attn_mask.dim() == 2:
+                attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(batch_size, self.nheads, -1, -1)
+            merged_mask = attn_mask_expanded
+
+            if key_padding_mask is not None:
+                key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len).expand(-1, self.nheads, seq_len, -1)
+                merged_mask = attn_mask_expanded + key_padding_mask_expanded
+
+        # no attn_mask and no key_padding_mask, returns None, None
         return merged_mask, mask_type
 
 
@@ -663,6 +681,7 @@ class FlashModel(nn.Module):
                     ):
         super(FlashModel, self).__init__()
         self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.label_size = label_size
         self.num_layers = num_layers
@@ -690,22 +709,30 @@ class FlashModel(nn.Module):
 
     def forward(self, inputs):
         inputs = inputs[:, :self.max_length]
+        #src_mask = self.get_src_mask(inputs)
         pad_mask = self.get_padding_mask(inputs)
         inputs = inputs.t()
         embed = self.embed(inputs)
         pos_embed = self.pos_embed(embed)
-        encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
+        encoding = torch.mean(self.encoder(pos_embed,
+                                #mask=src_mask,
+                                src_key_padding_mask=pad_mask), dim=0)
         output = self.proj(encoding)
         return F.log_softmax(output, dim=-1)
 
+    def get_src_mask(self, inputs):
+        batch_size, seq_len = inputs.shape
+        return torch.ones(batch_size, seq_len, seq_len)
+
     def get_padding_mask(self, inputs):
-        return torch.eq(inputs, 0)
+        return torch.ne(inputs, 0)
 
     def save_object(self):
         save = {
             "weights": self.state_dict(),
             "vocab_size": self.vocab_size,
-            "embedding_size": self.embedding_size,
+            "embedding_size": self.embedding_dim,
+            "hidden_dim": self.hidden_dim,
             "label_size": self.label_size,
             "num_layers": self.num_layers,
             "max_length": self.max_length,
@@ -716,37 +743,3 @@ class FlashModel(nn.Module):
         return save
 
 
-def _canonical_mask(
-        mask: Optional[Tensor],
-        mask_name: str,
-        other_type: Optional[DType],
-        other_name: str,
-        target_type: DType,
-        check_other: bool = True,
-) -> Optional[Tensor]:
-
-    if mask is not None:
-        _mask_dtype = mask.dtype
-        _mask_is_float = torch.is_floating_point(mask)
-        if _mask_dtype != torch.bool and not _mask_is_float:
-            raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported")
-        if check_other and other_type is not None:
-            if _mask_dtype != other_type:
-                warnings.warn(
-                    f"Support for mismatched {mask_name} and {other_name} "
-                    "is deprecated. Use same type for both instead."
-                )
-        if not _mask_is_float:
-            mask = (
-                torch.zeros_like(mask, dtype=target_type)
-                .masked_fill_(mask, float("-inf"))
-            )
-    return mask
-
-def _none_or_dtype(input: Optional[Tensor]) -> Optional[DType]:
-    if input is None:
-        return None
-    elif isinstance(input, torch.Tensor):
-        return input.dtype
-    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")

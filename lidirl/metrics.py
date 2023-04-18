@@ -59,7 +59,6 @@ class Results():
     def __init__(self, time, num_labels, length=1, device=None, type='TRAINING'):
         self.total_loss = 0
         self.perplexity = 0
-        print(num_labels)
         self.accuracy = tmc.Accuracy(task="multiclass", num_classes=num_labels).to(device)
         self.calibration_error = tmc.CalibrationError(task="multiclass", 
                                                             num_classes=num_labels, 
