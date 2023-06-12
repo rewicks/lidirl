@@ -3,6 +3,7 @@ import os, sys
 from re import M
 import logging
 import time
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,9 +19,9 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
     __package__ = 'lidirl'
 
 from . import __version__
-from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor
+from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
 from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, FlashModel
-from .augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short
+from .augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short, Codeswitch
 from .metrics import Results
 from .logger import TrainingLogger
 
@@ -37,7 +38,7 @@ logger = logging.getLogger("lidirl")
 ######################################################################################
 
 
-def save_model(model, model_type, dataset, processor, output_path, bytes, device=None, log_output=None):
+def save_model(model, model_type, dataset, processor, output_path, bytes, training_status, scheduler, optimizer, device=None, log_output=None):
     model = model.cpu()
     model_dict = model.save_object()
     model_dict['processor'] = processor.save_object()
@@ -45,6 +46,9 @@ def save_model(model, model_type, dataset, processor, output_path, bytes, device
     model_dict['vocab'] = dataset.vocab
     model_dict['bytes'] = bytes
     model_dict['model_type'] = model_type
+    model_dict["training_status"] = training_status
+    model_dict["scheduler"] = scheduler
+    model_dict["optimizer"] = optimizer.state_dict()
     torch.save(model_dict, output_path)
     model = model.to(device)
 
@@ -80,9 +84,12 @@ class Trainer():
         self.warmup_lr = args.warmup_lr
         if args.warmup_lr is not None and args.warmup_updates is not None:
             self.warmup_updates = args.warmup_updates
+            # self.optimizer = torch.optim.SGD(self.modle.parameters(), lr=self.warmup_lr)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.warmup_lr)
         else:
+            # self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.optimizer.zero_grad()
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1.0, gamma=0.95)
 
         total_params = sum([p.numel() for p in self.model.parameters()])
@@ -109,80 +116,164 @@ class Trainer():
         self.train_log = TrainingLogger(stdout=True,
                                             wandb_config=wandb_config)
 
+        self.num_updates = 0
+
     def run_epoch(self, args, epoch=0):
         completed = 0
-        running_loss = 0
+        # running_loss = 0
         for batch_index, (labels, texts) in self.train_dataset.enumerate(self.augmentations, self.augmentation_prob):
-            completed += len(labels)
-            inputs, labels = self.processor(texts, labels, self.device)
+            try:
+                completed += len(labels)
+                inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes)
+  
+                output = self.model(inputs)
 
-            output = self.model(inputs)
-
-            probs = torch.exp(output)
-            if args.model == "unet":
-                loss = 0
-                ppl = 0
-                for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
-                    loss += self.criterion(o, l)
-                    ppl += torch.exp(F.cross_entropy(o, l)).item() 
-                running_loss += loss
-                
-            else:
-                loss = self.criterion(output, labels)
-                running_loss += loss
-                ppl = torch.exp(F.cross_entropy(output, labels)).item()
-
-            self.results.calculate(loss.item(), ppl, probs, labels)
-
-            if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
-                logger.info(f"Model is warmed up. Now changing learning rate to {self.lr}")
-                for g in self.optimizer.param_groups:
-                    g['lr'] = self.lr
-                self.iswarm = True
-
-            if batch_index % args.update_interval == 0:
-                self.optimizer.zero_grad()
-                running_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-                self.optimizer.step()
-                running_loss = 0
-
-            if batch_index % args.log_interval == 0:
-                batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)
-                self.train_log(batch_results)
-                # logger.info(json.dumps(self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)))
-                self.results.reset(time.time())
-
-            if batch_index % args.validation_interval == 0:
-                validation_results = self.validate(args, validation_num = self.results.validations)
-                self.train_log.log(validation_results)
-                # logger.info(json.dumps(validation_results))
-                self.results.validated()
-                if self.best_model is not None:
-                    if validation_results['accuracy'] > self.best_model['accuracy']:
-                        self.best_model = validation_results
-                        save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
-                        logger.info(f"Improved accuracy of {validation_results['accuracy']}")
-                    elif validation_results['total_loss'] < self.best_model['total_loss']:
-                        self.best_model = validation_results
-                        save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
-                        logger.info(f"Improved loss of {validation_results['total_loss']}")
-                    else:
-                        if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.validation_threshold:
-                            logger.info(f"EARLY STOPPING: {json.dumps(self.best_model)}")
-                            return 0
+                probs = torch.exp(output)
+                if args.model == "unet":
+                    loss = 0
+                    ppl = 0
+                    for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
+                        loss += self.criterion(o, l)
+                        ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                    # running_loss += loss
+                    # self.optimizer.zero_grad()
+                    # loss.backward()
+                    
                 else:
-                    self.best_model = validation_results
-                    save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_best.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
-                if args.checkpoint_last:
-                    save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, 'checkpoint_last.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
+                    loss = self.criterion(output, labels)
+                    # running_loss += loss
+                    # self.optimizer.zero_grad()
+                    # loss.backward()
+                    ppl = torch.exp(F.cross_entropy(output, labels)/args.update_interval).item()
+
+                self.results.calculate(loss.item()/args.update_interval, ppl, probs, labels)
+
+                if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
+                    logger.info(f"Model is warmed up. Now changing learning rate to {self.lr}")
+                    for g in self.optimizer.param_groups:
+                        g['lr'] = self.lr
+                    self.iswarm = True
+
+                # self.optimizer.zero_grad()
+                # loss.backward()
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+                # self.optimizer.step()
+                # self.num_updates += 1
+
+
+                loss /= args.update_interval
+                loss.backward()
+
+                training_status = {
+                    "updates": self.num_updates,
+                    "batch_index": batch_index,
+                    "epoch": epoch
+                }
+
+                if batch_index % args.update_interval == 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    self.num_updates += 1
+                    if self.num_updates == args.max_updates:
+                        logger.info(f"Reached maximum number of updates ({args.max_updates}) for training. Stopping.")
+                        return 0
+
+                if (batch_index) % (args.log_interval * args.update_interval) == 0:
+                    batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)
+                    self.train_log.log(batch_results)
+                    self.results.reset(time.time())
+
+                if (batch_index) % (args.validation_interval * args.update_interval) == 0:
+                    validation_results = self.validate(args, validation_num = self.results.validations)
+                    self.train_log.log(validation_results)
+                    self.results.validated()
+                    if self.best_model is not None:
+                        if validation_results['accuracy'] > self.best_model['accuracy']:
+                            self.best_model = validation_results
+                            save_model(self.model, 
+                                            args.model, 
+                                            self.train_dataset, 
+                                            self.processor, 
+                                            os.path.join(self.output_path, 'checkpoint_best.pt'), 
+                                            self.train_dataset.bytes,
+                                            training_status=training_status,
+                                            scheduler=self.scheduler,
+                                            optimizer=self.optimizer,
+                                            device=self.device, 
+                                            log_output=self.best_model)
+                            logger.info(f"Improved accuracy of {validation_results['accuracy']}")
+                        elif validation_results['total_loss'] < self.best_model['total_loss']:
+                            self.best_model = validation_results
+                            save_model(self.model, 
+                                            args.model, 
+                                            self.train_dataset, 
+                                            self.processor, 
+                                            os.path.join(self.output_path, 'checkpoint_best.pt'),
+                                            self.train_dataset.bytes, 
+                                            training_status=training_status,
+                                            scheduler=self.scheduler,
+                                            optimizer=self.optimizer,
+                                            device=self.device, 
+                                            log_output=self.best_model)
+                            logger.info(f"Improved loss of {validation_results['total_loss']}")
+                        else:
+                            if epoch > args.min_epochs and validation_results['validation_num'] - self.best_model['validation_num'] >= args.patience:
+                                logger.info(f"EARLY STOPPING: {json.dumps(self.best_model)}")
+                                return 0
+                            if validation_results['validation_num'] - self.best_model['validation_num'] >= 1000000:
+                                self.scheduler.step()
+                    else:
+                        self.best_model = validation_results
+                        save_model(self.model, 
+                                        args.model, 
+                                        self.train_dataset, 
+                                        self.processor, 
+                                        os.path.join(self.output_path, 'checkpoint_best.pt'), 
+                                        self.train_dataset.bytes, 
+                                        training_status=training_status,
+                                        scheduler=self.scheduler,
+                                        optimizer=self.optimizer,
+                                        device=self.device, 
+                                        log_output=self.best_model)
+                    if args.checkpoint_last:
+                        save_model(self.model, 
+                                        args.model, 
+                                        self.train_dataset, 
+                                        self.processor, 
+                                        os.path.join(self.output_path, 'checkpoint_last.pt'),
+                                        self.train_dataset.bytes,
+                                        training_status=training_status,
+                                        scheduler=self.scheduler,
+                                        optimizer=self.optimizer, 
+                                        device=self.device, 
+                                        log_output=self.best_model)
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    logger.info("OOM: Clearing cache and trying again.")
+                    self.optimizer.zero_grad()
+                    torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise Exception(e)
         if args.save_every_epoch:
-            save_model(self.model, args.model, self.train_dataset, self.processor, os.path.join(self.output_path, f'epoch{epoch}.pt'), self.train_dataset.bytes, device=self.device, log_output=self.best_model)
+            save_model(self.model, 
+                            args.model, 
+                            self.train_dataset, 
+                            self.processor, 
+                            os.path.join(self.output_path, f'epoch{epoch}.pt'), 
+                            self.train_dataset.bytes,
+                            training_status=training_status,
+                            scheduler=self.scheduler,
+                            optimizer=self.optimizer,
+                            device=self.device,
+                            log_output=self.best_model)
         return 1
 
 
 
     def validate(self, args, validation_num=0):
+        torch.cuda.empty_cache()
         ret_results = {}
         accs = []
         losses = []
@@ -196,7 +287,7 @@ class Trainer():
             with torch.no_grad():
                 for batch_index, (labels, texts) in enumerate(val):
                     
-                    inputs, labels = self.processor(texts, labels, self.device)
+                    inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes)
                     # labels = labels.to(self.device)
 
                     output = self.model(inputs)
@@ -207,16 +298,21 @@ class Trainer():
                         for i, o, l in zip(inputs.transpose(0, 1), output.transpose(0,1), labels.transpose(0,1)):
                             if sum(i) == 0:
                                 break
-                            loss += self.criterion(o, l)
+                            loss += self.criterion(o, l).item()
                             ppl += torch.exp(F.cross_entropy(o, l)).item() 
                     else:
-                        loss = self.criterion(output, labels)
+                        loss = self.criterion(output, labels).item()
                         ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
                     probs = torch.exp(output)
 
-                    valid_results.calculate(loss.item(), ppl, probs, labels)
-            ret_results[val.group_name] = valid_results.get_results(self.optimizer.param_groups[0]['lr'])
+                    valid_results.calculate(loss, ppl, probs, labels)
+            ret_results[val.group_name] = {}
+            for key, value in valid_results.get_results(self.optimizer.param_groups[0]['lr']).items():
+                if key in ["accuracy", "total_loss", "ppl_per_pred", "num_pred"]:
+                    ret_results[val.group_name][key] = value
+                else:
+                    ret_results[key] = value
             accs.append(ret_results[val.group_name]["accuracy"])
             losses.append(ret_results[val.group_name]["total_loss"])
         ret_results["validation_num"] = validation_num
@@ -267,6 +363,7 @@ def build_model(args, dataset):
                                     montecarlo_layer=args.montecarlo_layer)
     elif args.model == "transformer":
         model = TransformerModel(vocab_size=len(dataset.vocab),
+                                    hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
                                     label_size=len(dataset.labels.keys()),
                                     num_layers=args.num_layers,
@@ -314,7 +411,7 @@ def build_model(args, dataset):
 
     return model
 
-def build_processor(args):
+def build_processor(args, visual=False):
     if args.model == "linear-ngram":
         logger.info("Buildling an NGramProcessor for an Ngram Linear Model")
         processor = NGramProcessor(
@@ -323,8 +420,12 @@ def build_processor(args):
             max_hash_value=args.max_hash_value,
         )
     elif args.model == "transformer":  
-        logger.info("Building a base Processor for a Transformer model") 
-        processor = Processor()
+        if visual:
+            logger.info("Building a Visual Processor for a Transformer model")
+            processor = VisRepProcessor() 
+        else:
+            logger.info("Building a base Processor for a Transformer model") 
+            processor = Processor()
     elif args.model == "roformer":
         logger.info("Building a base Processor for a Roformer Model")
         processor = Processor()
@@ -340,7 +441,7 @@ def build_processor(args):
     
     return processor
 
-def build_augmentations(args, vocab):
+def build_augmentations(args, vocab, is_bytes, is_visual):
     if args.augmentations is not None:
         augs = []
         probs = []
@@ -348,38 +449,83 @@ def build_augmentations(args, vocab):
         capitals = {}
         lowers = {}
 
-        for v, id in vocab.items():
-            if v in string.punctuation:
-                punctuation.append(id)
-            if v == "[SPACE]":
-                capitals[id] = id
-                lowers[id] = id
-            else:
-                capitals[id] = vocab.get(v.upper(), 0)
-                lowers[id] = vocab.get(v.lower(), 0)
+        if is_bytes:
+            byte_ids = {}
+            for key, value in vocab.items():
+                byte_ids[value] = key
+            capitals = {}
+            lowers = {}
+            space_idx = 32
+        elif is_visual:
+            byte_ids = None
+            space_idx = " "
+            for s in string.punctuation:
+                punctuation.append(s)
+        else:
+            byte_ids = None
+            for v, id in vocab.items():
+                if v in string.punctuation:
+                    punctuation.append(id)
+                if v == "[SPACE]":
+                    capitals[id] = id
+                    lowers[id] = id
+                else:
+                    capitals[id] = vocab.get(v.upper(), 0)
+                    lowers[id] = vocab.get(v.lower(), 0)
+            space_idx = vocab.get("[SPACE]", 0)
 
         for aug in args.augmentations.split('/'):
             aug = aug.split(',')
             prob = float(aug[1])
             aug = aug[0]
             if aug == "antspeak":
-                aug = Antspeak(vocab.get('[SPACE]'))
+                aug = Antspeak(space_idx=space_idx,
+                                is_byte=is_bytes,
+                                byte_ids=byte_ids)
             elif aug == "ngrams":
                 aug = NGrams(disallowed_repeats=punctuation,
-                            space_idx=vocab['[SPACE]'])
+                            space_idx=space_idx,
+                            is_byte=is_bytes,
+                            byte_ids=byte_ids)
             elif aug == "hashtag":
-                aug = Hashtags(hashtag_idx=vocab.get('#', 0), 
-                                    space_idx=vocab['[SPACE]'],
+                if is_bytes:
+                    hashtag_idx = 35
+                elif is_visual:
+                    hashtag_idx = "#"
+                else:
+                    hashtag_idx = vocab.get('#', 0)
+                aug = Hashtags(hashtag_idx=hashtag_idx, 
+                                    space_idx=space_idx,
                                     punctuation=punctuation,
                                     capitals=capitals,
-                                    lowers=lowers
+                                    lowers=lowers,
+                                    is_byte=is_bytes,
+                                    is_visual=is_visual,
+                                    byte_ids=byte_ids
                                     )
             elif aug == "short":
-                aug = Short(space_idx=vocab['[SPACE]'])
+                aug = Short(space_idx=space_idx,
+                            is_byte=is_bytes,
+                            byte_ids=byte_ids)
             elif aug == "spongebob":
                 aug = Spongebob(
                     capitals=capitals,
-                    lowers=lowers
+                    lowers=lowers,
+                    is_byte=is_bytes,
+                    is_visual=is_visual,
+                    byte_ids=byte_ids
+                )
+            elif aug == "codeswitch":
+                if is_bytes:
+                    space_span = [vocab[str(c)] for c in " ".encode("utf-8")]
+                elif is_visual:
+                    space_span = " "
+                else:
+                    space_span = [vocab.get('[SPACE]', vocab["<unk>"])]
+                aug = Codeswitch(
+                    space_span=space_span,
+                    is_byte=is_bytes,
+                    is_visual=is_visual
                 )
             augs.append(aug)
             probs.append(prob)
@@ -436,6 +582,10 @@ def parse_args():
                                 type=float,
                                 default=0.0001,
                                 help="The learning rate to use")
+    parser.add_argument("--step_rate",
+                                type=float,
+                                default=1.0,
+                                help="The rate at which to decay the learning rate")
     parser.add_argument("--embedding_dim",
                                 type=int,
                                 default=256,
@@ -455,7 +605,7 @@ def parse_args():
 
     parser.add_argument("--min_epochs", 
                                 type=int, 
-                                default=25,
+                                default=0,
                                 help="Minimum number of epochs to train for.")
     parser.add_argument("--max_epochs", 
                                 type=int,
@@ -484,8 +634,12 @@ def parse_args():
                                 help="Waits N updates to validate")
     parser.add_argument("--patience",
                                 type=int,
-                                default=-1,
+                                default=math.inf,
                                 help="If loss has not improved in N validations, stops training early.")
+    parser.add_argument("--max-updates",
+                                type=int,
+                                default=math.inf,
+                                help="The maximum number of updates before halting training.")
 
     parser.add_argument("--num-layers",
                                 default=3,
@@ -562,6 +716,8 @@ def parse_args():
 
 def main(args):
 
+    # breakpoint()
+
     train, valid = load_data(args)
 
     if args.checkpoint_path is not None:
@@ -569,9 +725,9 @@ def main(args):
     else:
         model = build_model(args, train)
 
-    processor = build_processor(args)
+    processor = build_processor(args, visual=train.visual)
 
-    augmentations = build_augmentations(args, train.vocab)
+    augmentations = build_augmentations(args, train.vocab, train.bytes, train.visual)
 
     trainer = Trainer(args, train, valid, model, processor, augmentations)
     for ep in range(args.min_epochs):
@@ -587,6 +743,7 @@ def main(args):
             break
         trainer.scheduler.step()
 
+    trainer.train_log.finish_log()
 
 if __name__ == "__main__":
     args = parse_args()

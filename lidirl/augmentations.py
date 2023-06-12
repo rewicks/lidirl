@@ -11,7 +11,7 @@ import pathlib
 import logging
 import os, sys
 
-if __package__ is None and __name__ == '__main__':
+if (__package__ is None or __package__ == "") and __name__ == '__main__':
     parent = pathlib.Path(__file__).absolute().parents[1]
     sys.path.insert(0, str(parent))
     __package__ = 'lidirl'
@@ -82,7 +82,7 @@ def count_words(text : List[int], space_idx : int) -> Tuple[int, int]:
 
     return num_words, space_idx
 
-def byte_to_char(text : List[int], ids_to_bytes: Dict) -> Tuple[List[int], Dict]:
+def byte_to_char(text : List[int]):
     """
         Full disclaimer that this is pretty inefficient. For byte-level inputs, need to map back to chars in order to 
         insert character-level noise. Very unfortunate but necessary for dynamic batch augmentation.
@@ -95,22 +95,15 @@ def byte_to_char(text : List[int], ids_to_bytes: Dict) -> Tuple[List[int], Dict]
                 - the corresponding character_id map
     """
 
-    byte_string = []
-    bytes_to_ids = {}
-    for t in text:
-        byte = ids_to_bytes[t]
-        byte_string.append(byte)
-        bytes_to_ids[byte] = t
-
-    characters = bytes(byte_string).decode('utf-8')
+    characters = text.decode('utf-8')
     
     out = []
     for c in characters:
         out.append(ord(c))
         
-    return (bytes_to_ids, bytes_to_ids)
+    return out
 
-def char_to_byte(text: List[int], bytes_to_ids: Dict) -> List[int]:
+def char_to_byte(text: List[int]) -> List[int]:
     """
         Reverses the byte_to_char by converting back to bytes. This is done after inserting noise and before returning it to trainer.
 
@@ -126,11 +119,11 @@ def char_to_byte(text: List[int], bytes_to_ids: Dict) -> List[int]:
     
     char_string = "".join(char_string).encode('utf-8')
 
-    out = []
-    for c in char_string:
-        out.append(bytes_to_ids[c])
+    # out = []
+    # for c in char_string:
+    #     out.append(bytes_to_ids[c])
 
-    return out
+    return char_string
 
 class Augmentation():
     """
@@ -150,7 +143,7 @@ class Short():
     def __init__(self, 
                     space_idx : int,
                     length : int=1,
-                    is_byte : bool = False, 
+                    is_byte : bool = False,
                     byte_ids : Dict = None):
         """
             Initialization function.
@@ -181,14 +174,14 @@ class Short():
 
         # if input is in bytes, convert to chars
         if self.is_byte:
-            text, map = byte_to_char(text, self.byte_ids)
+            text = byte_to_char(text)
 
         # grab a random span of specified length
         out = grab_a_span(text, space_idx=self.space_idx, span_size=self.length)
 
         # if input was bytes, convert back
         if self.is_byte:
-            out = char_to_byte(out, map)
+            out = char_to_byte(out)
 
         return out
 
@@ -232,19 +225,20 @@ class Antspeak(Augmentation):
 
         # if input is in bytes, convert to chars
         if self.is_byte:
-            text, map = byte_to_char(text, self.byte_ids)
+            text = byte_to_char(text)
 
         if random.random() < self.shorten_ratio:
-            text, _ = grab_a_span(text, space_idx=self.space_idx)
+            text = grab_a_span(text, space_idx=self.space_idx)
         out = []
         for t in text[:-1]:
             out.append(t)
-            out.append(self.special_charater if self.special_character is not None else self.space_idx)
+            out.append(self.special_character if self.special_character is not None else self.space_idx)
         out.append(text[-1])
 
         # if input was bytes, convert back
         if self.is_byte:
-            out = char_to_byte(out, map)
+            out = char_to_byte(out)
+
 
         return out
 
@@ -286,13 +280,12 @@ class NGrams(Augmentation):
 
             :return the same input with inserted noise
         """
-
         # if input is bytes, reverse to chars
         if self.is_byte:
-            text, map = byte_to_char(text, self.byte_ids)
+            text = byte_to_char(text)
 
         if random.random() < self.shorten_ratio:
-            text, _ = grab_a_span(text, space_idx=self.space_idx)
+            text = grab_a_span(text, space_idx=self.space_idx)
 
         out = []
         repeated = False
@@ -305,8 +298,8 @@ class NGrams(Augmentation):
                     out.append(t)
 
         # if input was bytes, convert back to bytes
-        if self.is_bytes:
-            out = char_to_byte(out, map)
+        if self.is_byte:
+            out = char_to_byte(out)
 
         return out
 
@@ -319,6 +312,7 @@ class Spongebob(Augmentation):
                     capitals : Dict, 
                     lowers : Dict, 
                     is_byte : bool = False,
+                    is_visual : bool = True,
                     byte_ids : Dict = None):
         """
             Initialization function
@@ -331,6 +325,7 @@ class Spongebob(Augmentation):
         self.capitals = capitals
         self.lowers = lowers
         self.is_byte = is_byte
+        self.is_visual = is_visual
         if is_byte and byte_ids is None:
             raise RuntimeError("is_byte set to True but byte_ids not provided.")
         self.byte_ids = byte_ids
@@ -346,18 +341,30 @@ class Spongebob(Augmentation):
 
         # if input is bytes, reverse to chars
         if self.is_byte:
-            text, map = byte_to_char(text, self.byte_ids)
+            text = byte_to_char(text)
 
         out = []
         for t in text:
             if random.random() <= 0.4:
-                out.append(self.capitals.get(t, t))
+                if self.is_byte:
+                    upper = chr(t).upper()
+                    out += [ord(u) for u in upper]
+                elif self.is_visual:
+                    out += t.upper()
+                else:
+                    out.append(self.capitals.get(t, t))
             else:
-                out.append(self.lowers.get(t, t))
+                if self.is_byte:
+                    lower = chr(t).lower()
+                    out += [ord(l) for l in lower]
+                elif self.is_visual:
+                    out += t.lower()
+                else:
+                    out.append(self.lowers.get(t, t))
 
         # if input was bytes, convert back to bytes
-        if self.is_bytes:
-            out = char_to_byte(out, map)
+        if self.is_byte:
+            out = char_to_byte(out)
 
         return out
 
@@ -375,6 +382,7 @@ class Hashtags(Augmentation):
                     length : int = 3,
                     camel_case : float = 0.5,
                     is_byte : bool = False,
+                    is_visual : bool = False,
                     byte_ids : Dict = None):
         """
             Initialization function
@@ -397,6 +405,7 @@ class Hashtags(Augmentation):
         self.length = length
         self.camel_case = camel_case
         self.is_byte = is_byte
+        self.is_visual = is_visual
         if is_byte and byte_ids is None:
             raise RuntimeError("is_byte set to True but byte_ids not provided.")
         self.byte_ids = byte_ids
@@ -432,9 +441,23 @@ class Hashtags(Augmentation):
                 if index >= start and index <= end:
                     if t not in self.punctuation:
                         if camel_case and word_begin:
-                            out.append(self.capitals.get(t, t))
+                            if self.is_byte:
+                                upper = chr(t).upper()
+                                out += [ord(u) for u in upper]
+                                # out.append(ord(chr(t).upper()))
+                            elif self.is_visual:
+                                out += t.upper()
+                            else:
+                                out.append(self.capitals.get(t, t))
                         else:
-                            out.append(self.lowers.get(t,t))
+                            if self.is_byte:
+                                lower = chr(t).lower()
+                                out += [ord(u) for u in lower]
+                                # out.append(ord(chr(t).lower()))
+                            elif self.is_visual:
+                                out += t.lower()
+                            else:
+                                out.append(self.lowers.get(t,t))
                         word_begin = False
         return out
         
@@ -445,7 +468,7 @@ class Hashtags(Augmentation):
 
         # if input is bytes, reverse to chars
         if self.is_byte:
-            text, map = byte_to_char(text, self.byte_ids)
+            text = byte_to_char(text)
 
         num_words, space_idx = count_words(text, self.space_idx)
 
@@ -453,11 +476,49 @@ class Hashtags(Augmentation):
             index = 0
         else:
             index = random.choice([_ for _ in range(num_words-self.length)])
-        camel_case = random.random() < self.camel_case_ratio
+        camel_case = random.random() < self.camel_case
         out = [self.hashtag_idx] + self.get_span(text, index, index+self.length-1, space_idx=space_idx, camel_case=camel_case)
 
         # if input was bytes, convert back to bytes
-        if self.is_bytes:
-            out = char_to_byte(out, map)
+        if self.is_byte:
+            out = char_to_byte(out)
 
+        return out
+
+class Codeswitch(Augmentation):
+    """
+        Randomly extracts a span and inserts a hashtag.
+    """
+
+    def __init__(self,
+                    space_span : List[int],
+                    is_byte: bool,
+                    is_visual: bool):
+        """
+            Initialization function
+        """
+        self.space_span = space_span
+        self.is_byte = is_byte
+        self.is_visual = is_visual
+        
+    def __call__(self, text : List[int], switch : List[int]) -> Tuple[List[int], List[int]]:
+        """
+            Randomly selects a span and puts a hashtag in front of it
+        """
+        if self.is_byte:
+            text = list(text)
+            switch = list(switch)
+        elif self.is_visual:
+            if type(text) is list:
+                text = "".join(text)
+            if type(switch) is list:
+                switch = "".join(switch)
+
+        
+        if random.random() < 0.5 :
+            out = text + self.space_span + switch, switch + self.space_span + text
+        else:
+            out = switch + self.space_span + text, text + self.space_span + switch
+        if self.is_byte:
+            out = bytes(out[0]), bytes(out[1])
         return out

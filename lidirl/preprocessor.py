@@ -10,7 +10,7 @@ import logging
 import os, sys
 from typing import List, Set, Dict, Tuple
 
-if __package__ is None and __name__ == '__main__':
+if (__package__ is None or __package__ == "") and __name__ == '__main__':
     parent = pathlib.Path(__file__).absolute().parents[1]
     sys.path.insert(0, str(parent))
     __package__ = 'lidirl'
@@ -35,6 +35,13 @@ import xxhash
 
 import torch
 from collections import Counter
+
+# from git import Repo
+from PIL import Image, ImageDraw, ImageFont
+from torchvision import transforms
+from fontTools.ttLib import TTFont
+
+from .augmentations import Codeswitch
 
 def generate_ngrams(input_text : str, ngram_order : int = 2) -> List[str]:
     """
@@ -70,15 +77,21 @@ class TrainingExample():
     """
         Holds one training example.
     """
-    def __init__(self, label : int = None, text : List[int] = None):
+    def __init__(self, label : int = None, text : List[int] = None, bytes=False):
         self.label = label
+        if bytes:
+            self.text = [t for t in text]
         self.text = text
-
     def size(self):
         return len(self.text)
 
     def save_object(self):
         return (self.label, self.text)
+
+    def random_truncate(self):
+        length = random.choice([_ for _ in range(200, 500)])
+        start_index = random.choice([_ for _ in range(0, len(self.text)-length)])
+        self.text = self.text[start_index:start_index+length]
 
 
 class Batch():
@@ -89,12 +102,17 @@ class Batch():
         self.labels = []
         self.texts = []
         self.size = 0
+        self.max_size = 0
 
     def add(self, example : TrainingExample):
         if example.size() > 0:
             self.labels.append(example.label)
             self.texts.append(example.text)
             self.size += example.size()
+            self.max_size = max(self.max_size, example.size())
+            self.size = self.max_size * len(self.labels)
+            # self.size += 1
+
 
 class TrainingShard():
     """
@@ -142,22 +160,33 @@ class TrainingShard():
 
         batch.ngrams = (padded_ngram_idx, padded_ngram_weights)
 
-    def shuffle_shard(self):
+    def sort_shard(self):
+        # self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
         random.shuffle(self.data)
 
     def get_batch(self, batch_size=2000, augmentations=None, augmentation_prob=0.0):
         batch = Batch()
-        for training_example in self.data:
-            if augmentations is not None and random.random() < augmentation_prob:
-                augment = get_augmentation(augmentations)
-            else:
-                augment = None
-            if augment is not None:
-                training_example = TrainingExample(label = training_example.label, text=augment(training_example.text))
-            if batch.size > 0 and batch.size + training_example.size() > batch_size: 
-                yield batch.labels, batch.texts
-                batch = Batch()
-            batch.add(training_example)
+        for i, training_example in enumerate(self.data):
+            if training_example.size() < batch_size:
+                if augmentations is not None and random.random() < augmentation_prob:
+                    augment = get_augmentation(augmentations)
+                else:
+                    augment = None
+                if augment is not None and batch.size > 0:
+                    if type(augment) is Codeswitch and batch.size > 0:
+                        choice_index = random.choice([_ for _ in range(len(batch.texts))])
+                        augment_one, augment_two = augment(batch.texts[choice_index], training_example.text)
+                        batch.size += (2*len(training_example.text)) + len(batch.texts[choice_index])
+                        batch.texts[choice_index] = augment_one
+                        training_example = TrainingExample(label = training_example.label, text=augment_two)
+                    else:
+                        training_example = TrainingExample(label = training_example.label, text=augment(training_example.text))
+                if batch.size > 0 and max(batch.size + training_example.size(), training_example.size()*len(batch.texts)) > batch_size: 
+                    yield batch.labels, batch.texts
+                    batch = Batch()
+                if training_example.size() > 2048:
+                    training_example.random_truncate()
+                batch.add(training_example)
         if len(batch.labels) > 0:
             yield batch.labels, batch.texts
 
@@ -168,6 +197,8 @@ class TrainingShard():
         self.data = []
         for d in data:
             self.data.append(TrainingExample(d[0], d[1]))
+        # self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
+        random.shuffle(self.data)
 
     def size(self):
         return len(self.data)
@@ -176,14 +207,24 @@ class Processor():
     def __init__(self):
         pass
 
-    def process_example(self, text, device):
-        return self.pad_batch(text, device)
+    def process_example(self, text, device, is_bytes=False):
+        return self.pad_batch(text, device, is_bytes=is_bytes)
 
     def process_label(self, labels, device):
         return labels.to(device)
 
-    def pad_batch(self, batch, device, max_size=None):
+    def convert_bytes(self, batch):
+        out = []
+        for item in batch:
+            out.append([t for t in item])
+        return out
+
+    def pad_batch(self, batch, device, max_size=None, is_bytes=False):
         max_size = 0
+
+        if is_bytes:
+            batch = self.convert_bytes(batch)
+
         for item in batch:
             max_size = max(max_size, len(item))
         
@@ -194,11 +235,98 @@ class Processor():
                 new_batch[-1].append(0)
         return torch.tensor(new_batch).to(device)
 
-    def __call__(self, text, labels, device):
-        return self.process_example(text, device), self.process_label(labels, device)
+    def __call__(self, text, labels, device, is_bytes=False):
+        return self.process_example(text, device, is_bytes=is_bytes), self.process_label(labels, device)
 
     def save_object(self):
         return {}
+
+class VisRepProcessor(Processor):
+    def __init__(self, fonts_path="/home/hltcoe/rwicks/langid/gcld3-pyfork/fonts", height=32, width=32):
+        self.fonts_path = fonts_path
+        self.fonts = []
+        for _, _, f in os.walk(fonts_path):
+            for fi in f:
+                if ".ttf" in fi or ".otf" in fi:
+                    font_path = os.path.join(fonts_path, fi)
+                    self.fonts.append((ImageFont.truetype(font_path, 32), TTFont(font_path), 0))
+        # self.font_path = os.path.join(font_path, 'ofl/inconsolata/static/Inconsolata-Regular.ttf')
+        # self.font = ImageFont.truetype(self.font_path, 32)
+        self.convert_tensor = transforms.ToTensor()
+        self.height = height
+        self.width = width
+        self.common_char = {}
+
+    def get_font(self, char):
+        char = ord(char)
+
+        break_out = False
+        retval = None
+        for id, (i, f, c) in enumerate(self.fonts):
+            for cmap in f['cmap'].tables:
+                if cmap.isUnicode():
+                    if char in cmap.cmap:
+                        retval = i
+                        break_out = True
+                        self.fonts[id] = (i, f, c+1)
+                        break
+            if break_out:
+                break
+        if retval is None:
+            retval = self.fonts[0][0]
+        self.fonts = sorted(self.fonts, key=lambda kv: kv[2], reverse=True)
+        return retval
+
+    def build_image(self, char):
+        if char in self.common_char:
+            self.common_char[char] = (self.common_char[char][0], self.common_char[char][1]+1)
+            return self.common_char[char][0]
+        image = Image.new('RGB', (self.width, self.height), color = (255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        font = self.get_font(char)
+
+        _, _, w, h = draw.textbbox((0, 0), char, font=font)
+        draw.text(((self.width-w)/2, (self.height-h)/2), char, font=font, fill=(0,0,0))
+        # draw.text((0,0), char, font=font, fill=(0,0,0))
+        image = image.convert('1')
+        tensor = self.convert_tensor(image)
+        self.common_char[char] = (tensor, self.common_char.get(char, (None, 0))[1] + 1)
+        if len(self.common_char) > 10000:
+            self.common_char = {k: v for k, v in sorted(self.common_char.items(), key=lambda item: item[1][1])[:10000]}
+        return tensor
+
+    def pad_batch(self, batch, device):
+        max_size = 0
+        for item in batch:
+            max_size = max(len(item), max_size)
+        
+        new_batch = []
+        for item in batch:
+            new_batch.append([])
+            for char in item:
+                new_batch[-1].append(self.build_image(char))
+            while len(new_batch[-1]) != max_size:
+                new_batch[-1].append(self.build_image(" "))
+
+        out = torch.cat([torch.unsqueeze(torch.cat(n), dim=0) for n in new_batch]).to(device)
+        # out = out.permute(0, 2, 3, 1)
+        return out
+        # return torch.tensor(new_batch).to(device)
+        
+    def process_example(self, text, device, is_bytes=False):
+        return self.pad_batch(text, device)
+
+    def process_labels(self, labels, device):
+        return labels.to(device)
+
+    def __call__(self, text, labels, device, is_bytes=False):
+        return self.process_example(text, device, is_bytes=is_bytes), self.process_label(labels, device)
+
+    def save_object(self):
+        return {
+            "fonts_path": self.fonts_path
+        }
+        
 
 class PaddedProcessor(Processor):
     def __init__(self, pad_length):
@@ -232,6 +360,7 @@ class PaddedProcessor(Processor):
         return {
             "pad_length": self.pad_length
         }
+    
 
 class NGramProcessor(Processor):
     def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):
@@ -352,14 +481,30 @@ class NGramProcessor(Processor):
 
 
 class Dataset():
-    def __init__(self, directory, bytes=False, max_shard_size=50000, batch_size=2000, type='train', group_name = None, vocab=None):
+    def __init__(self, 
+                    directory,
+                    bytes=False,
+                    visual=False,
+                    max_shard_size=50000,
+                    batch_size=2000,
+                    type='train',
+                    group_name = None,
+                    vocab=None,
+                    character_coverage=1.0,
+                    vocab_length=None):
         self.working_dir = directory
         self.max_shard_size = max_shard_size
         self.batch_size = batch_size
         self.labels = {
             "<unk>": 0
         }
-        if vocab is None:
+        if bytes:
+            self.vocab = dict(enumerate([_ for _ in range(256)]))
+            self.locked_vocab = True
+        elif visual:
+            self.vocab = {}
+            self.locked_vocab = True
+        elif vocab is None:
             self.vocab = {
                 "<unk>": 0
             }
@@ -367,11 +512,16 @@ class Dataset():
         else:
             self.vocab = vocab
             self.locked_vocab = True
+        self.locked_labels = False
+        
         self.shards = []
         self.type = type
         self.group_name = group_name
         self.bytes = bytes
+        self.visual = visual
         self.size = 0
+        self.character_coverage = character_coverage
+        self.vocab_length=vocab_length
 
     def process_data(self, train_files, temperature=1.0):
 
@@ -383,10 +533,33 @@ class Dataset():
         line_ranges = 0
         # also keep track of how many examples for each class exist
         class_counts = {}
+        if not self.locked_vocab:
+            vocab_counter = Counter()
         for infile in train_files:
             for line in open(infile):
-                line_ranges += 1
-                class_counts[line.split('\t')[0]] = class_counts.get(line.split('\t')[0], 0) + 1
+                line = line.split('\t')
+                if len(line) > 1:
+                    line_ranges += 1
+                    class_counts[line[0]] = class_counts.get(line[0], 0) + 1
+                    if not self.locked_vocab:
+                        if self.bytes:
+                            text = line[1].encode('utf-8')
+                        else:
+                            text = line[1]
+                        vocab_counter.update([t if t != ' ' else "[SPACE]" for t in text])
+
+
+        if not self.locked_vocab:
+            vocab_counter = sorted(list(vocab_counter.items()), key=lambda x: x[1], reverse=True)
+            if self.bytes:
+                vocab_size = len(vocab_counter)
+            elif self.vocab_length is None:
+                vocab_size = self.character_coverage * len(vocab_counter)
+            else:
+                vocab_size = self.vocab_length
+            for v, _ in vocab_counter[:int(vocab_size)]:
+                self.vocab[v] = len(self.vocab.keys())
+            self.locked_vocab = True
 
         # counts the total number of examples
         total = sum(class_counts.values())
@@ -417,34 +590,35 @@ class Dataset():
 
 
         # figure out the number of shards (new shuffled files) to be created
-        num_shards = int(total // self.max_shard_size) + 1
+        num_shards = int(line_ranges // self.max_shard_size) + 1
         shards = [open(os.path.join(TMP_DIR, f"{self.type}.shard_{n}"), 'w') for n in range(num_shards)]
         logger.info(f"Using {num_shards} shards for {self.type} due to max shard size of {self.max_shard_size}")
 
         # randomly distribute training file examples amongst shards
         for infile in train_files:
             for line in open(infile):
-                class_id = line.split('\t')[0]
-                # if this is a training file, we sample it
-                if self.type == "training":
-                    sample = random.random()
-                    sampling_rate = class_samples[class_id]
-                    # is sampling rate is greater than one, automatically sampled
-                    while sampling_rate >= 1.0:
+                if len(line.split('\t')) > 1:
+                    class_id = line.split('\t')[0]
+                    # if this is a training file, we sample it
+                    if self.type == "training":
+                        sample = random.random()
+                        sampling_rate = class_samples[class_id]
+                        # is sampling rate is greater than one, automatically sampled
+                        while sampling_rate >= 1.0:
+                            random_shard = random.choice(shards)
+                            random_shard.write(line)
+                            self.size += 1
+                            sampling_rate -= 1
+                        # for any leftover probability mass, only upsample this example that percent of the tiem
+                        if sample <= sampling_rate:
+                            random_shard = random.choice(shards)
+                            random_shard.write(line)
+                            self.size += 1
+                    # if it's validation, just copy everything over
+                    else:
                         random_shard = random.choice(shards)
                         random_shard.write(line)
                         self.size += 1
-                        sampling_rate -= 1
-                    # for any leftover probability mass, only upsample this example that percent of the tiem
-                    if sample <= sampling_rate:
-                        random_shard = random.choice(shards)
-                        random_shard.write(line)
-                        self.size += 1
-                # if it's validation, just copy everything over
-                else:
-                    random_shard = random.choice(shards)
-                    random_shard.write(line)
-                    self.size += 1
 
         for s in shards:
             s.close()
@@ -470,21 +644,25 @@ class Dataset():
                     example = example.strip().split('\t')
                     langid = example[0]
                     if len(example) > 1:
-                        
-                        label = self.labels.get(langid, len(self.labels))
-                        self.labels[langid] = label
+                        if not self.locked_labels:
+                            label = self.labels.get(langid, len(self.labels))
+                            self.labels[langid] = label
+                        else:
+                            label = self.labels.get(langid, "<unk>")
 
                         if self.bytes:
                             text = example[1].encode('utf-8')
+                        elif self.visual:
+                            text = example[1]
                         else:
                             text = []
                             for t in example[1]:
                                 t = '[SPACE]' if t == " " else t # replace spaces with text for readability
-                                self.vocab[t] = self.tok2id(t)
-                                text.append(self.vocab[t])
+                                t = self.tok2id(t)
+                                text.append(t)
                         
                         shard.add_example(label, text)
-            shard.shuffle_shard()
+            shard.sort_shard() # sorts by length in order to get better batching. Shards are already randomly distributed across data
             if self.group_name is None:
                 OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.shard_{shard_id}.bin")
             else:
@@ -499,11 +677,13 @@ class Dataset():
 
     def set_labels(self, labels):
         self.labels = labels
+        self.locked_labels = True
 
     def tok2id(self, tok):
         if not self.locked_vocab:
             self.vocab[tok] = self.vocab.get(tok, len(self.vocab))
-        return self.vocab.get(tok, self.vocab["<unk>"])
+        tok = self.vocab.get(tok, self.vocab["<unk>"])
+        return tok
 
     def __iter__(self):
         for shard_path in self.shards:
@@ -518,7 +698,7 @@ class Dataset():
                 yield torch.tensor(label_batch, dtype=torch.long), text_batch
 
     def enumerate(self, augmentations, augmentation_prob):
-        index = 0
+        index = 1
         for shard_path in self.shards:
             try:
                 shard = TrainingShard()
@@ -534,6 +714,7 @@ class Dataset():
     def save(self):
         output = {
             "bytes": self.bytes,
+            "visual": self.visual,
             "working_dir": self.working_dir,
             "max_shard_size": self.max_shard_size,
             "shards": self.shards,
@@ -556,7 +737,8 @@ class Dataset():
         else:
             input_path = os.path.join(self.working_dir, f"{self.type}.json")
         state = json.load(open(input_path))
-        self.bytes = state["labels"]
+        self.bytes = state["bytes"]
+        self.visual = state.get("visual", False)
         self.working_dir = state["working_dir"]
         self.max_shard_size = state["max_shard_size"]
         self.shards = state["shards"]
@@ -588,9 +770,13 @@ def parse_args():
                         help="Output dir to write data files")
     parser.add_argument('--bytes', action="store_true", default=False,
                             help="Stores whether to convert text into bytes for model input.")
+    parser.add_argument("--visual", action="store_true", default=False,
+                            help="")
     parser.add_argument('--max_shard_size', default=1000000, type=int,
                             help="Stores the maximum size for one shard (an intermediate file loaded during training) of data. \
                                 Bigger size means fewer binaries will be written. Smaller means training uses less CPU memory.")
+    parser.add_argument('--character_coverage', default=0.95, type=float)
+    parser.add_argument('--vocab_length', default=16000, type=int)
     parser.add_argument('--preset_vocabulary', default=None,
                             help="Path to a preset vocabulary. This is just the dictionary mapping of characters to ids for training. \
                                 In all likelihood this is unnecessary as we haven't implemented BPE")
@@ -633,7 +819,10 @@ def main(args):
     processed_train_dataset = Dataset(args.output_dir,
                                         max_shard_size=args.max_shard_size,
                                         type="train",
-                                        vocab=vocab)
+                                        bytes=args.bytes,
+                                        visual=args.visual,
+                                        vocab=vocab,
+                                        vocab_length=args.vocab_length)
     processed_train_dataset.process_data(args.train_files, temperature=args.temperature)
     processed_train_dataset.save()
 
@@ -651,6 +840,8 @@ def main(args):
             processed_valid_dataset = Dataset(args.output_dir,
                                                 max_shard_size=args.max_shard_size,
                                                 type="valid",
+                                                bytes=args.bytes,
+                                                visual=args.visual,
                                                 group_name=cluster,
                                                 vocab=processed_train_dataset.vocab)
             processed_valid_dataset.set_labels(processed_train_dataset.labels)
@@ -660,6 +851,8 @@ def main(args):
         processed_valid_dataset = Dataset(args.output_dir,
                                             max_shard_size=args.max_shard_size,
                                             type="valid",
+                                            bytes=args.bytes,
+                                            visual=args.visual,
                                             vocab=processed_train_dataset.vocab)
         processed_valid_dataset.set_labels(processed_train_dataset.labels)
         processed_valid_dataset.process_data(args.valid_files)

@@ -116,7 +116,7 @@ class RoformerModel(nn.Module):
                     max_len : int,
                     nhead : int = 8,
                     dropout : float = 0.1,
-                    montecarlo_layer : bool = False
+                    montecarlo_layer : bool = False,
                     ):
         super(RoformerModel, self).__init__()
         self.config = RoFormerConfig(
@@ -150,11 +150,19 @@ class RoformerModel(nn.Module):
         else:
             self.proj = nn.Linear(hidden_dim, label_size)
 
+
     def forward(self, inputs):
         inputs = inputs[:, :self.max_position_embeddings]
-        mask = torch.tensor(inputs!=0, dtype=torch.float)
-        encoding = torch.mean(self.model(inputs, attention_mask=mask).last_hidden_state, dim=1)
-        output = self.proj(encoding)
+        mask = (inputs!=0).clone().detach()
+        # mask = torch.tensor(inputs!=0, dtype=torch.float)
+        model_out = self.model(inputs, attention_mask=mask).last_hidden_state
+        # encoding = torch.mean(self.model(inputs, attention_mask=mask).last_hidden_state, dim=1)
+
+        input_mask_expanded = mask.unsqueeze(-1).expand(model_out.size()).float()
+        model_out[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
+        max_over_time = torch.max(model_out, 1)[0]
+
+        output = self.proj(max_over_time)
         return F.log_softmax(output, dim=-1)
 
     def save_object(self):
@@ -188,14 +196,28 @@ class TransformerModel(nn.Module):
                     max_len : int,
                     nhead : int = 8,
                     roformer : bool = True,
-                    montecarlo_layer : bool = False
+                    montecarlo_layer : bool = False,
+                    visual_inputs : bool = True
                     ):
         super(TransformerModel, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.embed = nn.Embedding(vocab_size, embedding_dim)
+        if visual_inputs:
+            kernel_size = 2
+            self.embed = nn.Sequential(
+                nn.Conv2d(1, embedding_dim, kernel_size, stride=1),
+                nn.ReLU(),
+                nn.Conv2d(embedding_dim, embedding_dim, kernel_size, stride=2),
+                nn.ReLU(),
+                nn.Conv2d(embedding_dim, embedding_dim, kernel_size, stride=2),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=4),
+        )
+        else:
+            self.embed = nn.Embedding(vocab_size, embedding_dim)
         self.pos_embed = PositionalEncoding(embed_size=embedding_dim, max_len=max_len)
         self.montecarlo_layer = montecarlo_layer
+        self.visual_inputs = visual_inputs
         if montecarlo_layer:
             self.proj = MCSoftmaxDenseFA(embedding_dim, label_size, 1, logits_only=True)
         else:
@@ -209,10 +231,19 @@ class TransformerModel(nn.Module):
         self.nhead = nhead
 
     def forward(self, inputs): # need to do padding mask
-        inputs = inputs[:, :self.max_length]
-        pad_mask = self.get_padding_mask(inputs)
-        inputs = inputs.t()
-        embed = self.embed(inputs)
+        if not self.visual_inputs:
+            inputs = inputs[:, :self.max_length]
+            pad_mask = self.get_padding_mask(inputs)
+            inputs = inputs.t()
+            embed = self.embed(inputs)
+        else:
+            inputs = inputs[:, :self.max_length, :, :]
+            pad_mask = None
+            inputs = inputs.permute(1, 0, 2, 3)
+            embed = inputs.unsqueeze(2)
+            for e_layer in self.embed:
+                embed = torch.cat([e_layer(_).unsqueeze(0) for _ in embed], dim=0)
+            embed = embed.view(embed.shape[0], embed.shape[1], -1)
         pos_embed = self.pos_embed(embed)
         encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
         output = self.proj(encoding)

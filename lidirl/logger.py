@@ -21,6 +21,11 @@ logger = logging.getLogger("lidirl")
 from typing import Dict
 import json
 
+try:
+    import wandb
+except:
+    logger.info("wandb not installed. If you would like to log your training with this tool please `pip install wandb`")
+
 from . import __version__
 
 class TrainingLogger():
@@ -28,7 +33,6 @@ class TrainingLogger():
                         wandb_config : Dict = None ):
         self.stdout = stdout
         if wandb_config is not None:
-            import wandb
             tags = os.getenv("WANDB_RUN_TAGS", default=None)
             if tags is not None:
                 tags = tags.split(',')
@@ -36,7 +40,7 @@ class TrainingLogger():
                 entity="rewicks",
                 project=wandb_config.get("project_name", None),
                 config = wandb_config.get("config", None),
-                group = os.getenv("WANDB_RUN_GROUP", defualt=None),
+                group = os.getenv("WANDB_RUN_GROUP", default=None),
                 tags = tags,
                 name = os.getenv("WANDB_RUN_NAME", default=None),
                 notes = os.getenv("WANDB_RUN_NOTES", default=None),
@@ -51,9 +55,12 @@ class TrainingLogger():
         if self.stdout:
             logger.info(json.dumps(out_json))
         if self.use_wandb:
-            wandb.log(out_json, commit=True)
+            log_json = {}
+            for key, value in out_json.items():
+                log_json[f"{out_json['type']}/{key}"] = value
+            wandb.log(log_json, commit=True)
 
-    def finish_log(self, end_message):
+    def finish_log(self, end_message=None):
         if end_message is not None:
             logger.info(end_message)
         if self.use_wandb:
@@ -62,3 +69,4 @@ class TrainingLogger():
 
 
         
+

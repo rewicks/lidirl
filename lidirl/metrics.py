@@ -96,7 +96,7 @@ class Results():
     def get_results(self, lr, completed=1):
         retVal = {}
         retVal['type'] = self.type
-        retVal['update_num'] = self.update_num
+        retVal['step'] = self.update_num
         retVal['complete'] = round(completed / self.length, 2)
         if self.type == "VALIDATION":
             retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
