@@ -41,7 +41,7 @@ from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
 from fontTools.ttLib import TTFont
 
-from .augmentations import Codeswitch
+from .augmentations import Codeswitch, URL, ReplaceEmoji
 
 def generate_ngrams(input_text : str, ngram_order : int = 2) -> List[str]:
     """
@@ -77,16 +77,17 @@ class TrainingExample():
     """
         Holds one training example.
     """
-    def __init__(self, label : int = None, text : List[int] = None, bytes=False):
-        self.label = label
+    def __init__(self, labels : List[int] = None, text : List[int] = None, bytes=False):
+        self.labels = labels
         if bytes:
             self.text = [t for t in text]
         self.text = text
+
     def size(self):
         return len(self.text)
 
     def save_object(self):
-        return (self.label, self.text)
+        return (self.labels, self.text)
 
     def random_truncate(self):
         length = random.choice([_ for _ in range(200, 500)])
@@ -106,12 +107,11 @@ class Batch():
 
     def add(self, example : TrainingExample):
         if example.size() > 0:
-            self.labels.append(example.label)
+            self.labels.append(example.labels)
             self.texts.append(example.text)
             self.size += example.size()
             self.max_size = max(self.max_size, example.size())
             self.size = self.max_size * len(self.labels)
-            # self.size += 1
 
 
 class TrainingShard():
@@ -121,8 +121,10 @@ class TrainingShard():
     def __init__(self):
         self.data = []
 
-    def add_example(self, label, text):
-        self.data.append(TrainingExample(label, text))
+    def add_example(self, labels, text):
+        if len(labels) == 1:
+            labels = [labels[0] for _ in text]
+        self.data.append(TrainingExample(labels, text))
 
     def pad_batch(self, batch : Batch):
         """
@@ -161,29 +163,71 @@ class TrainingShard():
         batch.ngrams = (padded_ngram_idx, padded_ngram_weights)
 
     def sort_shard(self):
-        # self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
-        random.shuffle(self.data)
+        self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
+        # random.shuffle(self.data)
 
     def get_batch(self, batch_size=2000, augmentations=None, augmentation_prob=0.0):
+        """
+        This is the main function for generating batches.
+        This is where the augmentatinos occur.
+        If you add a special type of augmentation then you may need to edit the logic here (similar to Codeswitching)
+        """
         batch = Batch()
         for i, training_example in enumerate(self.data):
+
+            # if the training example is too long, we're skipping
+            # at some point we should probably log it
             if training_example.size() < batch_size:
+
+                # if there are augmentations, we're going to randomly select one
                 if augmentations is not None and random.random() < augmentation_prob:
                     augment = get_augmentation(augmentations)
                 else:
                     augment = None
+                
+                # if an augmentation was selected, we're going to augment the training example
                 if augment is not None and batch.size > 0:
-                    if type(augment) is Codeswitch and batch.size > 0:
+
+                    # these are the different types of augmentations where the label must be None
+                    # None labels are treated as uniform outputs
+                    if type(augment) in [URL, ReplaceEmoji]:
+                        new_text = augment(training_example.text)
+                        new_labels = [None]
+                        training_example = TrainingExample(labels = new_labels, text=new_text)
+                    
+                    # another special augmentation is Codeswtiching
+                    # codeswitching chooses two training examples so there must be at least 1 previous training example in batch
+                    elif type(augment) is Codeswitch and batch.size > 0:
+
+                        # randomly choose a previously (sometimes augmented) training example
                         choice_index = random.choice([_ for _ in range(len(batch.texts))])
-                        augment_one, augment_two = augment(batch.texts[choice_index], training_example.text)
-                        batch.size += (2*len(training_example.text)) + len(batch.texts[choice_index])
-                        batch.texts[choice_index] = augment_one
-                        training_example = TrainingExample(label = training_example.label, text=augment_two)
+
+                        # if the choice is not one of the non-linguistic augmentations, we'll augment
+                        if batch.labels[choice_index][0] is not None:
+
+                            # returns both orders of the concatenation
+                            augment_one, augment_two = augment(batch.texts[choice_index], training_example.text)
+                            batch.size += (2*len(training_example.text)) + len(batch.texts[choice_index])
+
+                            # adjusts the previous training example and adds the new one
+                            batch.texts[choice_index] = augment_one
+                            new_labels = training_example.labels + [training_example.labels[0]] + batch.labels[choice_index]
+                            batch.labels[choice_index] += [training_example.labels[0]] + training_example.labels
+
+                            training_example = TrainingExample(labels = new_labels, text=augment_two)
+                    # every other augmentation is very straightforward
                     else:
-                        training_example = TrainingExample(label = training_example.label, text=augment(training_example.text))
+                        new_text = augment(training_example.text)
+                        new_labels = [training_example.labels[0] for _ in range(len(new_text))]
+                        training_example = TrainingExample(labels=new_labels, text=new_text)
+
+                # if there is at least one item in batch and the batch is big enough (with padding), we yield the batch
                 if batch.size > 0 and max(batch.size + training_example.size(), training_example.size()*len(batch.texts)) > batch_size: 
                     yield batch.labels, batch.texts
                     batch = Batch()
+
+                # if the training example is too long, we're going to randomly truncate it
+                # this is hard coded, but should correspond to the max length of the model
                 if training_example.size() > 2048:
                     training_example.random_truncate()
                 batch.add(training_example)
@@ -197,29 +241,87 @@ class TrainingShard():
         self.data = []
         for d in data:
             self.data.append(TrainingExample(d[0], d[1]))
-        # self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
-        random.shuffle(self.data)
+        
+        # this makes sure the data is sorted by length
+        # I've commented out the version where it's shuffled. I haven't decided which version I like.
+        self.data = sorted(self.data, key=lambda kv: (kv.size(), random.random()), reverse=True)
+        # random.shuffle(self.data)
 
     def size(self):
         return len(self.data)
 
+###########################################################################################
+#                                      PROCESSORS                                         #   
+###########################################################################################
+
+"""
+Processors are the objects that take in the data and turn it into the appropriate input 
+tensors to give to the model. There's a few variations based on the type of model
+"""
+
 class Processor():
-    def __init__(self):
-        pass
+    def __init__(self, vocab, labels):
+        self.vocab = vocab
+        self.labels = labels
 
     def process_example(self, text, device, is_bytes=False):
-        return self.pad_batch(text, device, is_bytes=is_bytes)
+        """
+        Turns characters (or bytes) into the appropriate input tensors
+        """
+        tokenized = []
+        for t in text:
+            if is_bytes:
+                tokenized.append([self.vocab[str(_)] for _ in t])
+            else:
+                tokenized.append([self.vocab.get(_, self.vocab["<unk>"]) for _ in t])
+        return self.pad_batch(tokenized, device, is_bytes=is_bytes)
 
-    def process_label(self, labels, device):
+    def process_labels(self, labels, device, token_level=False):
+        """
+        Maps language codes to the appropriate output tensors.
+        """
+
+        # if token level, we need outputs for each input character
+        if token_level:
+            out_labels = []
+            for label in labels:
+                if label[0] is None:
+                    token_label = []
+                    for l in label:
+                        token_label.append(0)
+                    token_label = torch.tensor(token_label)
+                else:
+                    token_label = torch.tensor(label)
+                out_labels.append(token_label.to(device))
+            return out_labels
+
+        # otherwise, we need a single output for the entire input
+        else:
+            # ratio_labels comes up with the proportion of each language in the input
+            # this is used for the non-linguistic augmentations and codeswitching
+            # the return value is the distribution
+            ratio_labels = []
+            for label in labels:
+                if label is None:
+                    label = [_ for _ in self.labels]
+                ratio_labels.append([])
+                counts = Counter(label)
+                for i, l in enumerate(self.labels):
+                    percent = counts.get(i, 0) / len(label)
+                    ratio_labels[-1].append(percent)
+        labels = torch.tensor(ratio_labels)
+
         return labels.to(device)
 
     def convert_bytes(self, batch):
+        # turns the bytes into an array of bytes
         out = []
         for item in batch:
             out.append([t for t in item])
         return out
 
     def pad_batch(self, batch, device, max_size=None, is_bytes=False):
+        # pads batch all to the same length
         max_size = 0
 
         if is_bytes:
@@ -235,14 +337,22 @@ class Processor():
                 new_batch[-1].append(0)
         return torch.tensor(new_batch).to(device)
 
-    def __call__(self, text, labels, device, is_bytes=False):
-        return self.process_example(text, device, is_bytes=is_bytes), self.process_label(labels, device)
+    def __call__(self, text, labels, device, is_bytes=False, token_level=False):
+        return self.process_example(text, device, is_bytes=is_bytes), self.process_labels(labels, device, token_level=token_level)
 
     def save_object(self):
         return {}
 
 class VisRepProcessor(Processor):
-    def __init__(self, fonts_path="/home/hltcoe/rwicks/langid/gcld3-pyfork/fonts", height=32, width=32):
+    """
+    This processor will render text input into an image.
+    Each character is it's own image.
+    """
+    def __init__(self, 
+                labels,
+                fonts_path="/home/hltcoe/rwicks/langid/gcld3-pyfork/fonts",
+                height=32,
+                width=32):
         self.fonts_path = fonts_path
         self.fonts = []
         for _, _, f in os.walk(fonts_path):
@@ -250,14 +360,14 @@ class VisRepProcessor(Processor):
                 if ".ttf" in fi or ".otf" in fi:
                     font_path = os.path.join(fonts_path, fi)
                     self.fonts.append((ImageFont.truetype(font_path, 32), TTFont(font_path), 0))
-        # self.font_path = os.path.join(font_path, 'ofl/inconsolata/static/Inconsolata-Regular.ttf')
-        # self.font = ImageFont.truetype(self.font_path, 32)
         self.convert_tensor = transforms.ToTensor()
         self.height = height
         self.width = width
         self.common_char = {}
+        self.labels = labels
 
     def get_font(self, char):
+        # looks for the first available font that has the character
         char = ord(char)
 
         break_out = False
@@ -287,9 +397,11 @@ class VisRepProcessor(Processor):
 
         _, _, w, h = draw.textbbox((0, 0), char, font=font)
         draw.text(((self.width-w)/2, (self.height-h)/2), char, font=font, fill=(0,0,0))
-        # draw.text((0,0), char, font=font, fill=(0,0,0))
         image = image.convert('1')
         tensor = self.convert_tensor(image)
+
+        # this is some logic for keeping the most common characters in memory so we don't have to re-render it
+        # this is a bit of a hack, but I think it works
         self.common_char[char] = (tensor, self.common_char.get(char, (None, 0))[1] + 1)
         if len(self.common_char) > 10000:
             self.common_char = {k: v for k, v in sorted(self.common_char.items(), key=lambda item: item[1][1])[:10000]}
@@ -309,18 +421,41 @@ class VisRepProcessor(Processor):
                 new_batch[-1].append(self.build_image(" "))
 
         out = torch.cat([torch.unsqueeze(torch.cat(n), dim=0) for n in new_batch]).to(device)
-        # out = out.permute(0, 2, 3, 1)
         return out
-        # return torch.tensor(new_batch).to(device)
         
     def process_example(self, text, device, is_bytes=False):
         return self.pad_batch(text, device)
 
-    def process_labels(self, labels, device):
+    def process_labels(self, labels, device, token_level=False):
+        # this is re-implemented, but I think it's the same as the superclass so it can probably be deleted.
+        if token_level:
+            out_labels = []
+            for label in labels:
+                if label[0] is None:
+                    token_label = []
+                    for l in label:
+                        token_label.append(0)
+                    token_label = torch.tensor(token_label)
+                else:
+                    token_label = torch.tensor(label)
+                out_labels.append(token_label.to(device))
+            return out_labels
+        else:
+            ratio_labels = []
+            for label in labels:
+                if label is None:
+                    label = [_ for _ in self.labels]
+                ratio_labels.append([])
+                counts = Counter(label)
+                for i, l in enumerate(self.labels):
+                    percent = counts.get(i, 0) / len(label)
+                    ratio_labels[-1].append(percent)
+        labels = torch.tensor(ratio_labels)
+
         return labels.to(device)
 
-    def __call__(self, text, labels, device, is_bytes=False):
-        return self.process_example(text, device, is_bytes=is_bytes), self.process_label(labels, device)
+    def __call__(self, text, labels, device, is_bytes=False, token_level=False):
+        return self.process_example(text, device, is_bytes=is_bytes), self.process_labels(labels, device)
 
     def save_object(self):
         return {
@@ -329,6 +464,9 @@ class VisRepProcessor(Processor):
         
 
 class PaddedProcessor(Processor):
+    """
+    This processor is for the UNET model. It pads the input to a fixed length.
+    """
     def __init__(self, pad_length):
         self.pad_length = pad_length
 
@@ -343,15 +481,15 @@ class PaddedProcessor(Processor):
     def process_example(self, text, device):
         return self.pad_batch(text, device)
 
-    def process_labels(self, labels, device):
-        if len(labels.shape) == 1:
-            retVal = []
-            for l in labels:
-                retVal.append([])
-                for _ in range(self.pad_length):
-                    retVal[-1].append(l)
-            return torch.tensor(retVal).to(device)
-        return labels
+    # def process_labels(self, labels, device):
+    #     if len(labels.shape) == 1:
+    #         retVal = []
+    #         for l in labels:
+    #             retVal.append([])
+    #             for _ in range(self.pad_length):
+    #                 retVal[-1].append(l)
+    #         return torch.tensor(retVal).to(device)
+    #     return labels
 
     def __call__(self, text, labels, device, augmentations, augmentation_prob):
         return self.process_example(text, device, augmentations, augmentation_prob), self.process_labels(labels, device)
@@ -363,6 +501,9 @@ class PaddedProcessor(Processor):
     
 
 class NGramProcessor(Processor):
+    """
+    This one is for the NGram model. It extracts ngrams and hashes them.
+    """
     def __init__(self, ngram_orders=[1,2,3], num_hashes=3, max_hash_value=128):
         self.ngram_orders = ngram_orders
         self.max_hash_value = max_hash_value
@@ -479,6 +620,10 @@ class NGramProcessor(Processor):
         }
         return out
 
+#####################################################################################################
+#                                       DATASET CLASS                                               #
+#####################################################################################################
+
 
 class Dataset():
     def __init__(self, 
@@ -492,6 +637,22 @@ class Dataset():
                     vocab=None,
                     character_coverage=1.0,
                     vocab_length=None):
+        """
+        Dataset class for loading and processing data
+
+        Args:
+            directory (str): Output directory for the data
+            bytes (bool, optional): Whether to use byte-level encoding. Defaults to False.
+            visual (bool, optional): Whether to use visual encoding. Defaults to False.
+            max_shard_size (int, optional): Maximum number of examples per shard. Defaults to 50000.
+            batch_size (int, optional): Batch size for training. Defaults to 2000.
+            type (str, optional): Type of data to load. Defaults to 'train'.
+            group_name (str, optional): Name of the validation group. Used during smart clustering. Defaults to None.
+            vocab (dict, optional): Vocabulary to use. Defaults to None.
+            character_coverage (float, optional): Character coverage to use. Defaults to 1.0.
+            vocab_length (int, optional): Length of the vocabulary. Defaults to None.
+        """
+            
         self.working_dir = directory
         self.max_shard_size = max_shard_size
         self.batch_size = batch_size
@@ -524,7 +685,11 @@ class Dataset():
         self.vocab_length=vocab_length
 
     def process_data(self, train_files, temperature=1.0):
+        """
+            Reads in the input files. Assigns labels. Performs sampling if necessary. Writes examples to randomly assigned data shards.
+        """
 
+        # Create a temporary directory for processing data
         TMP_DIR = os.path.join(self.working_dir, 'tmp/')
         logger.info(f"Making temp directory at {TMP_DIR}")
         os.makedirs(TMP_DIR, exist_ok=True)
@@ -533,22 +698,38 @@ class Dataset():
         line_ranges = 0
         # also keep track of how many examples for each class exist
         class_counts = {}
+
+        # when the vocabulary is locked, it cannot be adjusted
         if not self.locked_vocab:
             vocab_counter = Counter()
+
+        # iterate over the training files
         for infile in train_files:
             for line in open(infile):
+
+                # split the line into class and text
                 line = line.split('\t')
+
+                # catch any odd cases where the lang wasn't added or the line was empty
                 if len(line) > 1:
                     line_ranges += 1
+
+                    # class counts are used for temperature sampling
                     class_counts[line[0]] = class_counts.get(line[0], 0) + 1
+
+                    # if we haven't locked the vocabulary, we need to add all these characters to the vocab
                     if not self.locked_vocab:
                         if self.bytes:
                             text = line[1].encode('utf-8')
                         else:
                             text = line[1]
-                        vocab_counter.update([t if t != ' ' else "[SPACE]" for t in text])
+                        vocab_counter.update([t for t in text])
 
+                    # if labels are not locked, add this as a label
+                    if not self.locked_labels:
+                        self.add_label(line[0])
 
+        # now if the vocab isn't locked, we need to construct it based on character coverage and size
         if not self.locked_vocab:
             vocab_counter = sorted(list(vocab_counter.items()), key=lambda x: x[1], reverse=True)
             if self.bytes:
@@ -564,6 +745,7 @@ class Dataset():
         # counts the total number of examples
         total = sum(class_counts.values())
 
+        # only training data gets temperature-sampled
         if self.type == "train":
 
             # keep track of sampling probabilities after adjusted temperature
@@ -571,7 +753,6 @@ class Dataset():
             for class_key, count in class_counts.items():
                 class_probabilities[class_key] = math.pow(count/total, temperature)
 
-        
             # new total based off summed values after upsampling (temperature sampling)
             total = sum(class_probabilities.values())
             
@@ -633,6 +814,11 @@ class Dataset():
         self.batch_size = batch_size
 
     def process_shards(self, num_shards, TMP_DIR):
+        """
+        Processes the shards created by the data loader. 
+        It used to do more preprocessing with token indexes, but due to the augmentations, we no longer do that.
+        """
+
         for shard_id in range(num_shards):
             logger.info(f"Processing shard id {shard_id} for {self.type}")
             shard = TrainingShard()
@@ -642,27 +828,28 @@ class Dataset():
             with open(shard_path) as shard_file:
                 for example in shard_file:
                     example = example.strip().split('\t')
-                    langid = example[0]
-                    if len(example) > 1:
-                        if not self.locked_labels:
-                            label = self.labels.get(langid, len(self.labels))
-                            self.labels[langid] = label
-                        else:
-                            label = self.labels.get(langid, "<unk>")
 
+                    # this is eventually allowing for multiple labels as training
+                    # we have not tested, so I would not guarantee it's functionality
+                    langid = example[0].split(',')
+                    if len(example) > 1:
+                        labels = []
+                        for l in langid:
+                            labels.append(self.labels.get(l, "<unk>"))
+
+                        # if it's bytes, we'll pre-encode (the augmentations will undo this anyway)
                         if self.bytes:
                             text = example[1].encode('utf-8')
-                        elif self.visual:
-                            text = example[1]
                         else:
-                            text = []
-                            for t in example[1]:
-                                t = '[SPACE]' if t == " " else t # replace spaces with text for readability
-                                t = self.tok2id(t)
-                                text.append(t)
-                        
-                        shard.add_example(label, text)
+                            text = example[1]
+    
+                        shard.add_example(labels, text)
+            
+            # batch size corresponds better to number of tokens. In order to not have examples with heavy pad values, we sort by length.
+            # this may have an unintended effect by putting a significant number of the same language in the same batch. 
             shard.sort_shard() # sorts by length in order to get better batching. Shards are already randomly distributed across data
+            
+            # save the shard to disk
             if self.group_name is None:
                 OUTPUT_PATH = os.path.join(self.working_dir, f"{self.type}.shard_{shard_id}.bin")
             else:
@@ -679,25 +866,17 @@ class Dataset():
         self.labels = labels
         self.locked_labels = True
 
+    def add_label(self, langid):
+        if langid not in self.labels:
+            self.labels[langid] = len(self.labels.keys())
+
     def tok2id(self, tok):
         if not self.locked_vocab:
             self.vocab[tok] = self.vocab.get(tok, len(self.vocab))
         tok = self.vocab.get(tok, self.vocab["<unk>"])
         return tok
 
-    def __iter__(self):
-        for shard_path in self.shards:
-            try:
-                shard = TrainingShard()
-                shard.load_object(torch.load(shard_path))
-            except Exception as e:
-                print(e)
-                logger.error(f"Couldn't find processed shard at {shard_path}! Reprocess your data")
-                sys.exit(-1)
-            for label_batch, text_batch in shard.get_batch(self.batch_size):
-                yield torch.tensor(label_batch, dtype=torch.long), text_batch
-
-    def enumerate(self, augmentations, augmentation_prob):
+    def enumerate(self, augmentations=None, augmentation_prob=0.0):
         index = 1
         for shard_path in self.shards:
             try:
@@ -708,7 +887,8 @@ class Dataset():
                 logger.error(f"Couldn't find processed shard at {shard_path}! Reprocess your data")
                 sys.exit(-1)
             for label_batch, text_batch in shard.get_batch(self.batch_size, augmentations=augmentations, augmentation_prob=augmentation_prob):
-                yield index, (torch.tensor(label_batch, dtype=torch.long), text_batch)
+                yield index, (label_batch, text_batch)
+                # yield index, (torch.tensor(label_batch, dtype=torch.long), text_batch)
                 index += 1
 
     def save(self):
@@ -802,20 +982,22 @@ def get_augmentation(augmentations):
 
 
 def main(args):
-    # ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
 
+
+    # global flag used for debugging
     global DEBUG
     DEBUG = args.debug
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-
+    # If a specific vocabulary is required, load it
     if args.preset_vocabulary is not None:
         vocab = json.load(open(args.preset_vocabulary))
     else:
         vocab = None
 
+    # Create the training dataset
     processed_train_dataset = Dataset(args.output_dir,
                                         max_shard_size=args.max_shard_size,
                                         type="train",
@@ -826,16 +1008,17 @@ def main(args):
     processed_train_dataset.process_data(args.train_files, temperature=args.temperature)
     processed_train_dataset.save()
 
-    """
-        We also allow for multiple validation sets. Because of this, we may iterate over
-    """
+    # We also allow for multiple validation sets. Because of this, we may iterate over each validation set
     if args.smart_group_validation_files:
-        clusters = {
-
-        }
+        clusters = {}
+        """
+            Smart grouping works by assuming that all files within a parent directory have the same cluster
+        """
         for fi in args.valid_files:
             parent_path = os.path.abspath(fi).split('/')[-2]
             clusters[parent_path] = clusters.get(parent_path, []) + [fi]
+
+        # Create a unique validation set for each cluster
         for cluster, valid_files in clusters.items():
             processed_valid_dataset = Dataset(args.output_dir,
                                                 max_shard_size=args.max_shard_size,
@@ -847,6 +1030,7 @@ def main(args):
             processed_valid_dataset.set_labels(processed_train_dataset.labels)
             processed_valid_dataset.process_data(valid_files)
             processed_valid_dataset.save()
+    # otherwise, all validation data belongs in the same dataset
     else:
         processed_valid_dataset = Dataset(args.output_dir,
                                             max_shard_size=args.max_shard_size,

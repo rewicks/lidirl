@@ -58,8 +58,13 @@ import torchmetrics.classification as tmc
 class Results():
     def __init__(self, time, num_labels, length=1, device=None, type='TRAINING'):
         self.total_loss = 0
+        self.kl_loss = 0
         self.perplexity = 0
-        self.accuracy = tmc.Accuracy(task="multiclass", num_classes=num_labels).to(device)
+        self.binary_accuracy = tmc.Accuracy(task="multiclass",
+                                        num_classes=num_labels).to(device)
+        self.fuzzy_accuracy = tmc.Accuracy(task="multilabel",
+                                        num_labels=num_labels,
+                                        threshold=0.25).to(device)
         self.calibration_error = tmc.CalibrationError(task="multiclass", 
                                                             num_classes=num_labels, 
                                                             n_bins=10).to(device)
@@ -73,22 +78,37 @@ class Results():
         self.validations = 0
         self.type = type
 
-    def calculate(self, loss, ppl, y_hat, labels):
+    def calculate(self, loss, ppl, y_hat, labels, token_level):
         self.total_loss += loss
         self.perplexity += ppl
-        if len(labels.shape) == 2:
-            for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
+        if token_level:
+            for label, y_h in zip(labels, y_hat):
                 if self.type == "VALIDATION":
-                    self.accuracy.update(y_h, l)
-                    if self.calibration_error.update(y_h, l) == -1:
+                    length = label.shape[0]
+                    self.binary_accuracy.update(y_h[:length, :], label)
+                    if self.calibration_error.update(y_h[:length, :], label) == -1:
                         return -1
+                    # self.kl_loss += F.kl_div(y_h[:], label, reduction="batchmean").item()
+                self.num_pred += label.shape[0]
+                # for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
+                #     if self.type == "VALIDATION":
+                #         # self.fuzzy_accuracy.update(y_h, l)
+                #         if self.calibration_error.update(y_h, l) == -1:
+                #             return -1
                 #self.brier_score.update(y_h, l)
-                self.num_pred += l.shape[0]
+                # self.num_pred += l.shape[0]
         else:
             if self.type == "VALIDATION":
-                self.accuracy.update(y_hat, labels)
-                if self.calibration_error.update(y_hat, labels) == -1:
+                
+                targets = labels > 0
+                # self.fuzzy_accuracy.update(y_hat, targets)
+                
+                targets = torch.argmax(labels, dim=1)
+                self.binary_accuracy.update(y_hat, targets)
+                if self.calibration_error.update(y_hat, targets) == -1:
                     return -1
+                self.kl_loss += F.kl_div(y_hat, labels, reduction="batchmean").item()
+                
             #self.brier_score.update(y_hat, labels)
             self.num_pred += labels.shape[0]
         self.batches += 1
@@ -99,12 +119,14 @@ class Results():
         retVal['step'] = self.update_num
         retVal['complete'] = round(completed / self.length, 2)
         if self.type == "VALIDATION":
-            retVal['accuracy'] = round(self.accuracy.compute().item(), 4)
+            retVal['accuracy'] = round(self.binary_accuracy.compute().item(), 4)
             retVal['calibration_error'] = round(self.calibration_error.compute().item(), 4)
         #retVal['brier_score'] = round(self.brier_score.compute().item(), 4)
         retVal['lr'] = lr
         retVal['total_loss'] = round(self.total_loss, 4)
+        retVal['kl_loss'] = round(self.kl_loss, 4)
         retVal['average_loss'] = round(self.total_loss/self.num_pred, 4)
+        retVal["average_kl_loss"] = round(self.kl_loss/self.num_pred, 4)
         retVal['ppl_per_pred'] = round(self.perplexity/self.num_pred, 4)
         retVal['time_since_last_update'] = round(time.time()-self.last_update, 2)
         retVal['predictions_per_second'] = round(self.num_pred/retVal['time_since_last_update'])
@@ -116,10 +138,11 @@ class Results():
     # add perplexity
     def reset(self, time):
         self.total_loss = 0
+        self.kl_loss = 0
         self.perplexity = 0
         self.num_pred = 0
         if self.type == "VALIDATION":
-            self.accuracy.reset()
+            self.binary_accuracy.reset()
             self.calibration_error.reset()
         #self.brier_score.reset()
         self.update_num += 1

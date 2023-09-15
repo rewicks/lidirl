@@ -27,6 +27,7 @@ logger = logging.getLogger("lidirl")
 
 import argparse
 import torch
+import torch.nn.functional as F
 import json
 
 from . import __version__
@@ -41,7 +42,7 @@ class DefaultArgs():
     def __init__(self):
         pass
 
-def load_from_checkpoint(checkpoint_path : str):
+def load_from_checkpoint(checkpoint_path : str, data_path: str):
     """
         Loads a model from a checkpoint path.
     """
@@ -67,8 +68,9 @@ def load_from_checkpoint(checkpoint_path : str):
             max_len=model_dict["max_length"],
             nhead=model_dict["nhead"],
             montecarlo_layer=model_dict['montecarlo_layer']
-        )    
-        processor = Processor()
+        )
+        data = json.load(open(data_path))
+        processor = Processor(vocab=data['vocab'], labels=data['labels'])
     elif model_dict["model_type"] == "roformer":
         model = RoformerModel(
                     vocab_size=model_dict["vocab_size"],
@@ -81,7 +83,8 @@ def load_from_checkpoint(checkpoint_path : str):
                     dropout=model_dict["dropout"],
                     montecarlo_layer=model_dict['montecarlo_layer']
         )
-        processor = Processor()
+        data = json.load(open(data_path))
+        processor = Processor(vocab=data['vocab'], labels=data['labels'])
     elif model_dict["model_type"] == "convolutional":
         model = ConvModel(vocab_size=model_dict["vocab_size"],
                             label_size=model_dict["label_size"],
@@ -121,7 +124,7 @@ class EvalModel():
             :param model_path: path to the model checkpoint
             :param args: arguments from command line
         """
-        model, vocab, labels, processor = load_from_checkpoint(model_path)
+        model, vocab, labels, processor = load_from_checkpoint(model_path, args.dataset)
         self.model = model
         self.vocab = vocab
         self.labels = labels
@@ -130,8 +133,9 @@ class EvalModel():
             self.itos[labels[l]] = l
         self.processor = processor
         self.args = args
+        self.top = args.top
 
-    def label_file(self, input_file, output_file, device):
+    def label_file(self, input_file, output_file, device, multilabel=False):
         """
             Takes input file and writes labels to output (can still be stdin/stdout)
         """
@@ -141,16 +145,20 @@ class EvalModel():
 
         # treats input file the same as a training data shard with processing/batching
         data = self.build_shard(input_file)
-
+        # breakpoint()
         for labels, texts in data.get_batch(self.args.batch_size):
-
             # labels are actually just unks but to follow pipeline we keep them
-            labels = torch.tensor(labels, dtype=torch.long)
+            # labels = torch.tensor(labels, dtype=torch.long)
             inputs, labels = self.processor(texts, labels, device)
 
             # see what it says
             output = self.model(inputs)
-            probs = torch.exp(output)
+
+            if multilabel:
+                probs = F.sigmoid(output)
+            else:
+                probs = F.softmax(output, dim=-1)
+                # probs = torch.exp(output)
 
             # formats the output appropriates (either complete or 1-best format)
             outputs = self.build_output(probs)
@@ -171,10 +179,16 @@ class EvalModel():
                     output_dict[langid] = prediction[self.labels[langid]].item()
                 outputs.append(json.dumps(output_dict))
             else:
-                langid_index = torch.argmax(prediction).item()
-                prob = prediction[langid_index].item()
-                output_line = f'{self.itos[langid_index]}\t{prob}'
-                outputs.append(output_line)
+                ids = torch.topk(prediction, k=self.top).indices
+                output_line = ""
+                for id in ids:
+                    langid_index = id.item()
+                    prob = prediction[langid_index].item()
+                    output_line += f"{self.itos[langid_index]} {prob:.3f}\t"
+                # langid_index = torch.argmax(prediction).item()
+                # prob = prediction[langid_index].item()
+                # output_line = f'{self.itos[langid_index]}\t{prob}'
+                outputs.append(output_line.strip())
         return outputs
 
     def build_shard(self, input_file):
@@ -182,15 +196,16 @@ class EvalModel():
             Builds out the input data the same as training data.
         """
         data = TrainingShard()
-        langid = self.labels.get('<unk>', 0)
+        langid = [self.labels.get('<unk>', 0)]
         for line in input_file:
             if len(line.strip().split()) > 0:
-                line = [l for l in line.strip()]
-                text = []
-                for t in line:
-                    t = '[SPACE]' if t == ' ' else t
-                    text.append(self.vocab.get(t, 0))
-                data.add_example(langid, text)
+                # line = [l for l in line.strip()]
+                # text = []
+                # for t in line:
+                    # text.append(self.vocab.get(t, 0))
+                    # t = '[SPACE]' if t == ' ' else t
+                    # text.append(self.vocab.get(t, 0))
+                data.add_example(langid, line.strip())
             else:
                 data.add_example(langid, [0 for _ in range(10)])
         return data
@@ -205,12 +220,16 @@ def parse_args():
 
     parser.add_argument('--model', '-m', default=None,
                             help="Either name of or path to a pretrained model")
+    parser.add_argument('--dataset')
     parser.add_argument('--input', '-i', default=None,
                             help="Input file. Defaults to stdin.")
     parser.add_argument('--output', '-o', default=None,
                             help="Path to output file. Defaults to stdout.")
     parser.add_argument('--complete', action='store_true', default=False,
                             help="Stores whether or not to output complete probability distribution. Defaults to False.")
+    parser.add_argument("--top", default=1, type=int)
+    parser.add_argument("--multilabel", default=False, action="store_true")
+
     parser.add_argument('--cpu', action='store_true', default=False,
                             help="Uses CPU (GPU is default if available)")
     parser.add_argument('--batch_size', '-b', default=500, type=int,
@@ -254,6 +273,7 @@ def label_langs(args):
 
     # build wrapper system
     model = EvalModel(args.model, args)
+    
 
     # label file
     model.label_file(input_file, output_file, device)

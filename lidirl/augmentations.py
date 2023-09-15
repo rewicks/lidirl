@@ -5,6 +5,9 @@ Inserts different types of noise to data.
 
 """
 from typing import Optional, Any, Union, Callable, Tuple, List, Dict
+from leetspeak import LEETSPEAK
+from cyrillic import CYRILLIC
+from emoticons import EMOTICONS
 
 ################################ PACKAGING AND LOGGING ################################
 import pathlib
@@ -28,22 +31,22 @@ logger = logging.getLogger("lidirl")
 #################################### FUNCTIONALITY ####################################
 
 import random
+import string
+import json
 
-def grab_a_span(text : List[int], 
-                    space_idx : int,
+def grab_a_span(text : List[int],
                     span_size : int = 3) -> List[int]:
     """
-    From a given input, grabs a short span and returns. Assumes words are separated by "space_idx".
+    From a given input, grabs a short span and returns. I think it makes sense to also add some logic for non-whitespace scripts
 
     :param text: The list of input ids (corresponding to characters of bytes). 
                     Expected to be semi-processed for training (i.e. already mapping to ids instead of input tokens)
-    :param space_idx: The value of the space character for separating words. 
-                        If this character is not found in the text, it assumes words are not whitespace separated (used for Chinese or similar).
     :span_size: The number of words (or equivalent) to include in span. Defaults to 3.
     """
 
     # count words and determine if there are no space symbols
-    num_words, space_idx = count_words(text, space_idx)
+    num_words = len(text.split())
+    # num_words, space_idx = count_words(text, space_idx)
 
     # if the text is already shorter than our desired span, return
     if num_words < span_size + 1:
@@ -55,19 +58,18 @@ def grab_a_span(text : List[int],
     # iterate over text to accumulate words in span
     out = []
     index = 0
-    for t in text:
+    for t in " ".join(text.split()):
 
         # words are counted via space symbol unless there isn't one
-        if t == space_idx or space_idx is None:
+        if t == " " or num_words == 1:
             index += 1
         
         # append all words between
         if index >= start_index and index <= start_index+span_size:
-            if index == start_index and t != space_idx:
+            if index == start_index and t != " ":
                 out.append(t)
             elif index > start_index:
                 out.append(t)
-    
     return out
 
 def count_words(text : List[int], space_idx : int) -> Tuple[int, int]:
@@ -96,12 +98,7 @@ def byte_to_char(text : List[int]):
     """
 
     characters = text.decode('utf-8')
-    
-    out = []
-    for c in characters:
-        out.append(ord(c))
-        
-    return out
+    return characters
 
 def char_to_byte(text: List[int]) -> List[int]:
     """
@@ -112,18 +109,8 @@ def char_to_byte(text: List[int]) -> List[int]:
 
         :return augmented byte-level input for model
     """
+    return text.encode('utf-8')
 
-    char_string = []
-    for t in text:
-        char_string.append(chr(t))
-    
-    char_string = "".join(char_string).encode('utf-8')
-
-    # out = []
-    # for c in char_string:
-    #     out.append(bytes_to_ids[c])
-
-    return char_string
 
 class Augmentation():
     """
@@ -141,26 +128,16 @@ class Short():
     """
 
     def __init__(self, 
-                    space_idx : int,
                     length : int=1,
-                    is_byte : bool = False,
-                    byte_ids : Dict = None):
+                    is_byte : bool = False):
         """
             Initialization function.
 
-            :param space_idx: The id for the space symbol in the vocabulary.
+            :param length: The length of the span to grab.
             :param is_byte: If training data is byte level or character level. Default: false (character level)
-            :param byte_ids: Model's vocabulary to reverse ids back to bytes.
         """
-        self.space_idx = space_idx
         self.length = length
-
         self.is_byte = is_byte
-        if is_byte and byte_ids is None:
-            raise RuntimeError("is_byte set to True but byte_ids not provided.")
-        self.byte_ids = byte_ids
-
-
 
     def __call__(self, text : List[int]) -> List[int]:
         """
@@ -177,7 +154,9 @@ class Short():
             text = byte_to_char(text)
 
         # grab a random span of specified length
-        out = grab_a_span(text, space_idx=self.space_idx, span_size=self.length)
+        out = grab_a_span(text, span_size=self.length)
+
+        out = "".join(out)
 
         # if input was bytes, convert back
         if self.is_byte:
@@ -192,25 +171,17 @@ class Antspeak(Augmentation):
     """
 
     def __init__(self, 
-                    space_idx : int,
                     is_byte : bool = False,
-                    byte_ids : Dict = None,
                     shorten_ratio : float = 0.5,
-                    special_character : int = None):
+                    special_character : str = " "):
         """
             Initialization function
 
-            :param space_idx: The id for the space symbol in the vocabulary.
             :param is_byte: If training data is byte level or character level. Default: false (character level)
-            :param byte_ids: Model's vocabulary to reverse ids back to bytes.
             :param shorten_ratio: The ratio at which to grab a span for antspeak instead of using the whole thing.
-            :param special_character: The character to insert. If None, insert space_idx.
+            :param special_character: The character to insert. Default is " ".
         """
-        self.space_idx = space_idx
         self.is_byte = is_byte
-        if is_byte and byte_ids is None:
-            raise RuntimeError("is_byte set to True but byte_ids not provided.")
-        self.byte_ids = byte_ids
         self.shorten_ratio = shorten_ratio
         self.special_character = special_character
 
@@ -222,23 +193,25 @@ class Antspeak(Augmentation):
 
             :return the same input with inserted noise
         """
-
         # if input is in bytes, convert to chars
         if self.is_byte:
             text = byte_to_char(text)
 
         if random.random() < self.shorten_ratio:
-            text = grab_a_span(text, space_idx=self.space_idx)
+            text = grab_a_span(text)
+
         out = []
         for t in text[:-1]:
-            out.append(t)
-            out.append(self.special_character if self.special_character is not None else self.space_idx)
+            if t != " ":
+                out.append(t)
+                out.append(self.special_character if self.special_character is not None else " ")
         out.append(text[-1])
+
+        out = "".join(out)
 
         # if input was bytes, convert back
         if self.is_byte:
             out = char_to_byte(out)
-
 
         return out
 
@@ -247,30 +220,21 @@ class NGrams(Augmentation):
         Inserts noise by repeating n-grams.
     """
 
-    def __init__(self, 
-                    disallowed_repeats : List[int],
-                    space_idx : int, 
+    def __init__(self,
                     is_byte : bool = False, 
-                    byte_ids : Dict = None,
-                    shorten_ratio : float = 0.5):
+                    shorten_ratio : float = 0.5,
+                    repeat_ratio : float = 0.05):
         """
             Initialization function
 
-            :param disallowed_repeats: a list of tokens that shouldn't be repeated. Reserved for punctuation and similar tokens.
-            :param space_idx: The id for the space symbol in the vocabulary.
             :param is_byte: If training data is byte level or character level. Default: false (character level)
-            :param byte_ids: Model's vocabulary to reverse ids back to bytes.
-            :param shorten_ratio: The ratio at which to grab a span for antspeak instead of using the whole thing.
-            :param special_character: The character to insert. If None, insert space_idx.
+            :param shorten_ratio: The percent at which to grab a span for antspeak instead of using the whole thing.
+            :param repeat_ratio: The percent of time that a character is repeated. Default 0.05.
         """
-        self.disallowed_repeats = disallowed_repeats
-        self.space_idx = space_idx
         self.is_byte = is_byte
-        if is_byte and byte_ids is None:
-            raise RuntimeError("is_byte set to True but byte_ids not provided.")
-        self.byte_ids = byte_ids
         self.repetitions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         self.shorten_ratio = shorten_ratio
+        self.repeat_ratio = repeat_ratio
 
     def __call__(self, text : List[int]) -> List[int]:
         """
@@ -285,18 +249,19 @@ class NGrams(Augmentation):
             text = byte_to_char(text)
 
         if random.random() < self.shorten_ratio:
-            text = grab_a_span(text, space_idx=self.space_idx)
+            text = grab_a_span(text)
 
         out = []
         repeated = False
         for i, t in enumerate(text):
             out.append(t)
-            if not repeated and i == len(text) - 1 or random.random() <= 0.05:
+            if not repeated and t not in string.punctuation + " " and i == len(text) - 1 or random.random() <= 0.05:
                 repeated = True
                 repeat = random.choice(self.repetitions)
                 for r in range(repeat):
                     out.append(t)
 
+        out = "".join(out)
         # if input was bytes, convert back to bytes
         if self.is_byte:
             out = char_to_byte(out)
@@ -309,26 +274,12 @@ class Spongebob(Augmentation):
     """
 
     def __init__(self, 
-                    capitals : Dict, 
-                    lowers : Dict, 
-                    is_byte : bool = False,
-                    is_visual : bool = True,
-                    byte_ids : Dict = None):
+                    is_byte : bool = False):
         """
             Initialization function
-
-            :param capitals: a dictionary of every token to its upper-case version
-            :param lowers: a dictionary of every token to its lower-case version
             :param is_byte: If training data is byte level or character level. Default: false (character level)
-            :param byte_ids: Model's vocabulary to reverse ids back to bytes.
         """
-        self.capitals = capitals
-        self.lowers = lowers
         self.is_byte = is_byte
-        self.is_visual = is_visual
-        if is_byte and byte_ids is None:
-            raise RuntimeError("is_byte set to True but byte_ids not provided.")
-        self.byte_ids = byte_ids
 
     def __call__(self, text : List[int]) -> List[int]:
         """
@@ -345,22 +296,12 @@ class Spongebob(Augmentation):
 
         out = []
         for t in text:
-            if random.random() <= 0.4:
-                if self.is_byte:
-                    upper = chr(t).upper()
-                    out += [ord(u) for u in upper]
-                elif self.is_visual:
-                    out += t.upper()
-                else:
-                    out.append(self.capitals.get(t, t))
+            if random.random() <= 0.5:
+                out.append(t.upper())
             else:
-                if self.is_byte:
-                    lower = chr(t).lower()
-                    out += [ord(l) for l in lower]
-                elif self.is_visual:
-                    out += t.lower()
-                else:
-                    out.append(self.lowers.get(t, t))
+                out.append(t.lower())
+
+        out = "".join(out)
 
         # if input was bytes, convert back to bytes
         if self.is_byte:
@@ -373,48 +314,26 @@ class Hashtags(Augmentation):
         Randomly extracts a span and inserts a hashtag.
     """
 
-    def __init__(self, 
-                    hashtag_idx : int, 
-                    space_idx : int, 
-                    punctuation : List[int],
-                    capitals : Dict,
-                    lowers : Dict,
+    def __init__(self,
                     length : int = 3,
                     camel_case : float = 0.5,
-                    is_byte : bool = False,
-                    is_visual : bool = False,
-                    byte_ids : Dict = None):
+                    is_byte : bool = False):
         """
             Initialization function
 
-            :param hashtag_idx: id for hashtag symbol in model vocabulary
-            :param space_idx: id for space symbol in model vocabulary
-            :param punctuation: a list of all ids for punctuation
-            :param capitals: a dictionary of every token to its upper-case version
-            :param lowers: a dictionary of every token to its lower-case version
             :param length: the length of the extracted span to use
             :param camel_case: how often to turn the extracted span into camel case instead of all lower case
             :param is_byte: If training data is byte level or character level. Default: false (character level)
-            :param byte_ids: Model's vocabulary to reverse ids back to bytes.
         """
-        self.hashtag_idx = hashtag_idx
-        self.space_idx = space_idx
-        self.punctuation=punctuation
-        self.capitals=capitals
-        self.lowers=lowers
         self.length = length
         self.camel_case = camel_case
         self.is_byte = is_byte
-        self.is_visual = is_visual
-        if is_byte and byte_ids is None:
-            raise RuntimeError("is_byte set to True but byte_ids not provided.")
-        self.byte_ids = byte_ids
+        self.special_character = '#'
 
     def get_span(self, 
                     text : List[int], 
                     start : int,
                     end : int,
-                    space_idx : int = None,
                     camel_case : bool = False) -> List[int]:
         """
             From a given input, grabs a short span and returns. Assumes words are separated by "space_idx".
@@ -424,8 +343,6 @@ class Hashtags(Augmentation):
                             Expected to be semi-processed for training (i.e. already mapping to ids instead of input tokens)
             :param start: Index to start at
             :param end: Index to end at
-            :param space_idx: The value of the space character for separating words. 
-                                If this character is not found in the text, it assumes words are not whitespace separated (used for Chinese or similar).
             :param camel_case determines if the returned hashtag will be camel case or not
 
             :return extracted span in appropriate lower/camel case format
@@ -434,30 +351,16 @@ class Hashtags(Augmentation):
         index = 0
         word_begin = True
         for t in text:
-            if t == space_idx or space_idx is None:
+            if t == " ":
                 index += 1
                 word_begin = True
             else:
                 if index >= start and index <= end:
-                    if t not in self.punctuation:
+                    if t not in string.punctuation:
                         if camel_case and word_begin:
-                            if self.is_byte:
-                                upper = chr(t).upper()
-                                out += [ord(u) for u in upper]
-                                # out.append(ord(chr(t).upper()))
-                            elif self.is_visual:
-                                out += t.upper()
-                            else:
-                                out.append(self.capitals.get(t, t))
+                            out.append(t.upper())
                         else:
-                            if self.is_byte:
-                                lower = chr(t).lower()
-                                out += [ord(u) for u in lower]
-                                # out.append(ord(chr(t).lower()))
-                            elif self.is_visual:
-                                out += t.lower()
-                            else:
-                                out.append(self.lowers.get(t,t))
+                            out.append(t.lower())
                         word_begin = False
         return out
         
@@ -470,14 +373,16 @@ class Hashtags(Augmentation):
         if self.is_byte:
             text = byte_to_char(text)
 
-        num_words, space_idx = count_words(text, self.space_idx)
+        num_words = len(text.split(" "))
 
         if num_words <= self.length:
             index = 0
         else:
             index = random.choice([_ for _ in range(num_words-self.length)])
         camel_case = random.random() < self.camel_case
-        out = [self.hashtag_idx] + self.get_span(text, index, index+self.length-1, space_idx=space_idx, camel_case=camel_case)
+        out = [self.special_character] + self.get_span(text, index, index+self.length-1, camel_case=camel_case)
+
+        out = "".join(out)
 
         # if input was bytes, convert back to bytes
         if self.is_byte:
@@ -487,38 +392,367 @@ class Hashtags(Augmentation):
 
 class Codeswitch(Augmentation):
     """
-        Randomly extracts a span and inserts a hashtag.
+        Returns the concatenation of a+b and b+a
     """
 
     def __init__(self,
-                    space_span : List[int],
-                    is_byte: bool,
-                    is_visual: bool):
+                    is_byte: bool = False):
         """
             Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
         """
-        self.space_span = space_span
+        self.space_span = [" "]
         self.is_byte = is_byte
-        self.is_visual = is_visual
         
     def __call__(self, text : List[int], switch : List[int]) -> Tuple[List[int], List[int]]:
         """
-            Randomly selects a span and puts a hashtag in front of it
+            Returns the concatenation of a+b and b+a
         """
         if self.is_byte:
-            text = list(text)
-            switch = list(switch)
-        elif self.is_visual:
-            if type(text) is list:
-                text = "".join(text)
-            if type(switch) is list:
-                switch = "".join(switch)
+            text = byte_to_char(text)
+            switch = byte_to_char(switch)
+
+        text = [_ for _ in text]
+        switch = [_ for _ in switch]
+
+        out = "".join(text + self.space_span + switch), "".join(switch + self.space_span + text)
+
+        if self.is_byte:
+            out = char_to_byte(out[0]), char_to_byte(out[1])
+
+        return out
+
+class LeetSpeak(Augmentation):
+    """
+        Randomly substitutes Latin characters for a lookalike.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False,
+                    change_ratio : float = 0.3):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+            :param change_ratio: How often to change a character that is found in the leetspeak dictionary
+        """
+        self.is_byte = is_byte
+        self.change_ratio = change_ratio
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly substitutes Latin characters for a lookalike.
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
 
         
-        if random.random() < 0.5 :
-            out = text + self.space_span + switch, switch + self.space_span + text
-        else:
-            out = switch + self.space_span + text, text + self.space_span + switch
+        out = []
+        for t in text:
+            if t in LEETSPEAK and random.random() < self.change_ratio:
+                out.append(random.choice(LEETSPEAK[t]))
+            else:
+                out.append(t)
+
+        out = "".join(out)
+
         if self.is_byte:
-            out = bytes(out[0]), bytes(out[1])
+            out = char_to_byte(out)
+
+        return out
+
+class Cyrillic(Augmentation):
+    """
+        Randomly substitutes Latin characters for Cyrillic lookalikes.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False,
+                    change_ratio : float = 0.75):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+            :param change_ratio: How often to change a character that is found in the Cyrillic dictionary
+        """
+        self.is_byte = is_byte
+        self.change_ratio = change_ratio
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly substitutes Latin characters for Cyrillic lookalikes.
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        out = []
+        for t in text:
+            if t in CYRILLIC and random.random() < self.change_ratio:
+                out.append(random.choice(CYRILLIC[t]))
+            else:
+                out.append(t)
+
+        out = "".join(out)
+
+        if self.is_byte:
+            out = char_to_byte(out)
+
+        return out
+
+def generate_url():
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-_"
+    url = random.choice(["http", "https"])
+    url += "://www."
+    domain_length = random.choice([5,6,7,8,9,10,11,12])
+    for _ in range(domain_length):
+        url += random.choice(alphabet)
+    url += '.com/'
+    postfix_length = random.choice([5,6,7,8,9,10,11,12])
+    for _ in range(postfix_length):
+        url += random.choice(alphabet)
+    return url
+
+class URL(Augmentation):
+    """
+        Ignores the input and returns a randomly generated URL
+    """
+
+    def __init__(self,
+                    is_byte: bool = False):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+        """
+        self.is_byte = is_byte
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Ignores the input and returns a randomly generated URL
+        """
+
+        url = generate_url()
+        if self.is_byte:
+            url = char_to_byte(url)
+        return url
+
+class HTML(Augmentation):
+    """
+        Randomly adds a small set of HTML tags to the input string.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+        """
+        self.is_byte = is_byte
+        self.tags = [
+            ("<b>", "</b>"),
+            ("<i>", "</i>"),
+            ("<u>", "</u>"),
+            ("<s>", "</s>"),
+            ("<a href=", "</a>"),
+        ]
+
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly adds a small set of HTML tags to the input string.
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        words = text.split(" ")
+        if len(words) > 1:
+            start_index = random.choice([_ for _ in range(len(words)-1)])
+            end_index = start_index + random.choice([1, 2, 3])
+            if end_index >= len(words):
+                end_index = len(words) - 1
+            
+            tags = random.choice(self.tags)
+            start_tag = tags[0]
+            end_tag = tags[1]
+            if "a href" in tags[0]:
+                start_tag += generate_url() + ">"
+            out = " ".join(words[:start_index] + [start_tag] + words[start_index:end_index] + [end_tag] + words[end_index:])
+        else:
+            return text
+
+        out = "".join(out)
+
+        if self.is_byte:
+            out = char_to_byte(out)
+
+        return out
+
+class ReplaceEmoji(Augmentation):
+    """
+        Ignores the input string, and returns an emoticon.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+        """
+        self.is_byte = is_byte
+
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Ignores the input string, and returns an emoticon.
+        """
+        out = random.choice(EMOTICONS)
+        if self.is_byte:
+            out = char_to_byte(out)
+        return out
+
+class AddEmoji(Augmentation):
+    """
+        Randomly adds an emoticon between words in the input string.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False):
+        """
+            Initialization function
+            :param is_byte: If training data is byte level or character level. Default: false (character level)
+        """
+        self.is_byte = is_byte
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly adds an emoticon between words in the input string.
+        """
+
+        emoticon = random.choice(EMOTICONS)
+
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        words = text.split(" ")
+        insertion_index = random.choice([_ for _ in range(len(words))])
+        if insertion_index == 0:
+            out = emoticon + " " + text
+        else:
+            out = " ".join(words[:insertion_index] + [emoticon] + words[insertion_index:])
+
+        if self.is_byte:
+            out = char_to_byte(out)
+        return out
+
+
+class Delete(Augmentation):
+    """
+        Randomly deletes a character from the input string.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False,
+                    change_ratio : float = 0.1):
+        """
+            Initialization function
+            :param is_byte: Whether the input is a byte string or not
+            :param change_ratio: The probability of deleting a character
+        """
+        self.is_byte = is_byte
+        self.change_ratio = change_ratio
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly deletes a character from the input string.
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        
+        out = []
+        for t in text:
+            if random.random() >= self.change_ratio:
+                out.append(t)
+
+        out = "".join(out)
+
+        if self.is_byte:
+            out = char_to_byte(out)
+
+        return out
+
+class Swap(Augmentation):
+    """
+        Randomly swaps the position of two adjacent characters in the input string.
+    """
+
+    def __init__(self,
+                    is_byte: bool = False,
+                    change_ratio : float = 0.1):
+        """
+            Initialization function
+            :param is_byte: Whether the input is a byte string or not
+            :param change_ratio: The probability that a character will be swapped
+        """
+        self.is_byte = is_byte
+        self.change_ratio = change_ratio
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly swaps the position of two adjacent characters in the input string.
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        out = []
+        for t in text:
+            if random.random() >= self.change_ratio or len(out) == 0:
+                out.append(t)
+            else:
+                out = out[:-1] + [t] + [out[-1]]
+                
+        out = "".join(out)
+
+        if self.is_byte:
+            out = char_to_byte(out)
+
+        return out
+
+
+class Add(Augmentation):
+    """
+        Randomly adds in new character to input string
+    """
+
+    def __init__(self,
+                    is_byte: bool = False,
+                    change_ratio : float = 0.3):
+        """
+            Initialization function
+            :param is_byte: Whether the input is a byte string or not
+            :param change_ratio: The ratio of characters to change
+        """
+        self.is_byte = is_byte
+        self.change_ratio = change_ratio
+
+    def __call__(self, text : List[int]) -> List[int]:
+        """
+            Randomly adds in new character to input string
+        """
+        if self.is_byte:
+            text = byte_to_char(text)
+
+        out = []
+        for t in text:
+            if random.random() < self.change_ratio:
+                new_char = random.choice([ord(_) for _ in text])
+                new_char += 5
+                try:
+                    out.append(chr(new_char))
+                except:
+                    pass
+            out.append(t)
+                
+        out = "".join(out)
+
+        if self.is_byte:
+            out = char_to_byte(out)
+
         return out

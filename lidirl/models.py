@@ -117,6 +117,7 @@ class RoformerModel(nn.Module):
                     nhead : int = 8,
                     dropout : float = 0.1,
                     montecarlo_layer : bool = False,
+                    token_level : bool = False
                     ):
         super(RoformerModel, self).__init__()
         self.config = RoFormerConfig(
@@ -130,7 +131,7 @@ class RoformerModel(nn.Module):
             attention_probs_dropout_prob = dropout,
             max_position_embeddings = max_len,
             type_vocab_size = 2,
-            rotary_value = False
+            rotary_value = False,
         )
         self.vocab_size = vocab_size
         self.embedding_size = embedding_dim
@@ -143,7 +144,9 @@ class RoformerModel(nn.Module):
         self.max_position_embeddings = max_len
         self.label_size = label_size
         self.montecarlo_layer = montecarlo_layer
+        self.token_level = token_level
 
+        # print(self.config)
         self.model = RoFormerModel(self.config)
         if montecarlo_layer:
             self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
@@ -157,13 +160,18 @@ class RoformerModel(nn.Module):
         # mask = torch.tensor(inputs!=0, dtype=torch.float)
         model_out = self.model(inputs, attention_mask=mask).last_hidden_state
         # encoding = torch.mean(self.model(inputs, attention_mask=mask).last_hidden_state, dim=1)
-
-        input_mask_expanded = mask.unsqueeze(-1).expand(model_out.size()).float()
-        model_out[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
-        max_over_time = torch.max(model_out, 1)[0]
-
-        output = self.proj(max_over_time)
-        return F.log_softmax(output, dim=-1)
+        # print(self.token_level)
+        # print(model_out.shape)
+        if not self.token_level:
+            input_mask_expanded = mask.unsqueeze(-1).expand(model_out.size()).float()
+            model_out[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
+            model_out = torch.max(model_out, 1)[0]
+        # print(model_out.shape)
+        output = self.proj(model_out)
+        # print(output.shape)
+        # exit()
+        # return F.log_softmax(output, dim=-1)
+        return output
 
     def save_object(self):
         save = {
@@ -176,7 +184,8 @@ class RoformerModel(nn.Module):
             "dropout": self.hidden_dropout_prob,
             "max_len": self.max_position_embeddings,
             "label_size": self.label_size,
-            "montecarlo_layer": self.montecarlo_layer
+            "montecarlo_layer": self.montecarlo_layer,
+            "token_level": self.token_level
         }
         return save
 
@@ -197,7 +206,7 @@ class TransformerModel(nn.Module):
                     nhead : int = 8,
                     roformer : bool = True,
                     montecarlo_layer : bool = False,
-                    visual_inputs : bool = True
+                    visual_inputs : bool = False
                     ):
         super(TransformerModel, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead)
@@ -247,7 +256,7 @@ class TransformerModel(nn.Module):
         pos_embed = self.pos_embed(embed)
         encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
         output = self.proj(encoding)
-        return F.log_softmax(output, dim=-1)
+        return F.softmax(output, dim=-1)
 
     def get_padding_mask(self, inputs):
         return torch.eq(inputs, 0)

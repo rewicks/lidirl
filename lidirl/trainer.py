@@ -21,7 +21,12 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
 from . import __version__
 from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
 from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, FlashModel
-from .augmentations import Antspeak, Hashtags, NGrams, Spongebob, Short, Codeswitch
+from .augmentations import Antspeak, Hashtags, NGrams, \
+                                Spongebob, Short, Codeswitch, \
+                                LeetSpeak, Cyrillic, HTML, URL, \
+                                AddEmoji, ReplaceEmoji, \
+                                Delete, Add, Swap \
+
 from .metrics import Results
 from .logger import TrainingLogger
 
@@ -52,6 +57,11 @@ def save_model(model, model_type, dataset, processor, output_path, bytes, traini
     torch.save(model_dict, output_path)
     model = model.to(device)
 
+def load_model(model_path, device=torch.device('cpu')):
+    model_dict = torch.load(model_path)
+    
+    optimizer = torch.optim.Adam()
+
 class Trainer():
     def __init__(self, args, train, valid, model, processor, augmentations):
         self.with_cuda = torch.cuda.is_available() and not args.cpu
@@ -79,15 +89,16 @@ class Trainer():
         self.augmentations = augmentations
         self.augmentation_prob = args.augmentation_probability
 
-        self.criterion = nn.NLLLoss()
+        if args.multilabel:
+            self.criterion = nn.BCELoss()
+        else:
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.lr = args.lr
         self.warmup_lr = args.warmup_lr
         if args.warmup_lr is not None and args.warmup_updates is not None:
             self.warmup_updates = args.warmup_updates
-            # self.optimizer = torch.optim.SGD(self.modle.parameters(), lr=self.warmup_lr)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.warmup_lr)
         else:
-            # self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         self.optimizer.zero_grad()
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1.0, gamma=0.95)
@@ -113,6 +124,7 @@ class Trainer():
             "project_name": args.wandb_proj,
             "run_name": args.wandb_run
         }
+
         self.train_log = TrainingLogger(stdout=True,
                                             wandb_config=wandb_config)
 
@@ -120,21 +132,29 @@ class Trainer():
 
     def run_epoch(self, args, epoch=0):
         completed = 0
-        # running_loss = 0
         for batch_index, (labels, texts) in self.train_dataset.enumerate(self.augmentations, self.augmentation_prob):
             try:
                 completed += len(labels)
-                inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes)
-  
+                inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes, token_level=args.token_level)
+                if args.multilabel:
+                    for label in labels:
+                        label[label > 0] = 1
+                        
                 output = self.model(inputs)
+                if not args.multilabel:
+                    output = F.log_softmax(output, dim=-1)
+                else:
+                    output = F.sigmoid(output)
 
-                probs = torch.exp(output)
-                if args.model == "unet":
+                # probs = torch.exp(output)
+                if args.model == "unet" or args.token_level:
                     loss = 0
                     ppl = 0
-                    for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
-                        loss += self.criterion(o, l)
-                        ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                    for b, label in enumerate(labels):
+                        for o, l in zip(output[b], label):
+                            # for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
+                            loss += self.criterion(o, l)
+                            ppl += torch.exp(F.cross_entropy(o, l)).item() 
                     # running_loss += loss
                     # self.optimizer.zero_grad()
                     # loss.backward()
@@ -146,7 +166,7 @@ class Trainer():
                     # loss.backward()
                     ppl = torch.exp(F.cross_entropy(output, labels)/args.update_interval).item()
 
-                self.results.calculate(loss.item()/args.update_interval, ppl, probs, labels)
+                self.results.calculate(loss.item()/args.update_interval, ppl, output, labels, args.token_level)
 
                 if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
                     logger.info(f"Model is warmed up. Now changing learning rate to {self.lr}")
@@ -171,6 +191,7 @@ class Trainer():
                 }
 
                 if batch_index % args.update_interval == 0:
+                    # breakpoint()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
@@ -273,6 +294,7 @@ class Trainer():
 
 
     def validate(self, args, validation_num=0):
+        # breakpoint()
         torch.cuda.empty_cache()
         ret_results = {}
         accs = []
@@ -285,28 +307,31 @@ class Trainer():
                                         device=self.device,
                                         type='VALIDATION')
             with torch.no_grad():
-                for batch_index, (labels, texts) in enumerate(val):
-                    
-                    inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes)
+                for batch_index, (labels, texts) in val.enumerate():
+                    # breakpoint()
+                    inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes, token_level=args.token_level)
                     # labels = labels.to(self.device)
-
                     output = self.model(inputs)
 
-                    if args.model == "unet":
+                    if not args.multilabel:
+                        output = F.log_softmax(output, dim=-1)
+                    else:
+                        output = F.sigmoid(output)
+
+                    if args.model == "unet" or args.token_level:
                         loss = 0
                         ppl = 0
-                        for i, o, l in zip(inputs.transpose(0, 1), output.transpose(0,1), labels.transpose(0,1)):
-                            if sum(i) == 0:
-                                break
-                            loss += self.criterion(o, l).item()
-                            ppl += torch.exp(F.cross_entropy(o, l)).item() 
+                        for b, label in enumerate(labels):
+                            for i, o, l in zip(inputs[b], output[b], label):
+                                loss += self.criterion(o, l).item()
+                                ppl += torch.exp(F.cross_entropy(o, l)).item()
                     else:
                         loss = self.criterion(output, labels).item()
                         ppl = torch.exp(F.cross_entropy(output, labels)).item()
 
                     probs = torch.exp(output)
 
-                    valid_results.calculate(loss, ppl, probs, labels)
+                    valid_results.calculate(loss, ppl, probs, labels, args.token_level)
             ret_results[val.group_name] = {}
             for key, value in valid_results.get_results(self.optimizer.param_groups[0]['lr']).items():
                 if key in ["accuracy", "total_loss", "ppl_per_pred", "num_pred"]:
@@ -369,7 +394,8 @@ def build_model(args, dataset):
                                     num_layers=args.num_layers,
                                     max_len=args.max_length,
                                     nhead=args.nhead,
-                                    montecarlo_layer=args.montecarlo_layer)
+                                    montecarlo_layer=args.montecarlo_layer,
+                                    visual_inputs=dataset.visual)
     elif args.model == "roformer":
         model = RoformerModel(vocab_size=len(dataset.vocab),
                                     embedding_dim=args.embedding_dim,
@@ -379,7 +405,8 @@ def build_model(args, dataset):
                                     max_len=args.max_length,
                                     nhead=args.nhead,
                                     dropout=args.dropout,
-                                    montecarlo_layer=args.montecarlo_layer)
+                                    montecarlo_layer=args.montecarlo_layer,
+                                    token_level=args.token_level)
     elif args.model == "convolutional":
         model = ConvModel(vocab_size=len(dataset.vocab),
                             label_size=len(dataset.labels.keys()),
@@ -411,7 +438,7 @@ def build_model(args, dataset):
 
     return model
 
-def build_processor(args, visual=False):
+def build_processor(args, vocab, labels, visual=False):
     if args.model == "linear-ngram":
         logger.info("Buildling an NGramProcessor for an Ngram Linear Model")
         processor = NGramProcessor(
@@ -422,19 +449,23 @@ def build_processor(args, visual=False):
     elif args.model == "transformer":  
         if visual:
             logger.info("Building a Visual Processor for a Transformer model")
-            processor = VisRepProcessor() 
+            processor = VisRepProcessor(labels=labels) 
         else:
             logger.info("Building a base Processor for a Transformer model") 
-            processor = Processor()
+            processor = Processor(vocab=vocab,
+                                    labels=labels)
     elif args.model == "roformer":
         logger.info("Building a base Processor for a Roformer Model")
-        processor = Processor()
+        processor = Processor(vocab=vocab,
+                                    labels=labels)
     elif args.model == "flash":
         logger.info("Building a base Processor for a Flash Model")
-        processor = Processor()
+        processor = Processor(vocab=vocab,
+                                    labels=labels)
     elif args.model == "convolutional":
         logger.info("Building a base Processor for a Convolutional model") 
-        processor = Processor()
+        processor = Processor(vocab=vocab,
+                                labels=labels)
     elif args.model == "unet":
         logger.info("Building a base Processor for a UNet model") 
         processor = PaddedProcessor(args.pad_length)     
@@ -445,88 +476,66 @@ def build_augmentations(args, vocab, is_bytes, is_visual):
     if args.augmentations is not None:
         augs = []
         probs = []
-        punctuation = []
-        capitals = {}
-        lowers = {}
-
-        if is_bytes:
-            byte_ids = {}
-            for key, value in vocab.items():
-                byte_ids[value] = key
-            capitals = {}
-            lowers = {}
-            space_idx = 32
-        elif is_visual:
-            byte_ids = None
-            space_idx = " "
-            for s in string.punctuation:
-                punctuation.append(s)
-        else:
-            byte_ids = None
-            for v, id in vocab.items():
-                if v in string.punctuation:
-                    punctuation.append(id)
-                if v == "[SPACE]":
-                    capitals[id] = id
-                    lowers[id] = id
-                else:
-                    capitals[id] = vocab.get(v.upper(), 0)
-                    lowers[id] = vocab.get(v.lower(), 0)
-            space_idx = vocab.get("[SPACE]", 0)
 
         for aug in args.augmentations.split('/'):
             aug = aug.split(',')
             prob = float(aug[1])
             aug = aug[0]
             if aug == "antspeak":
-                aug = Antspeak(space_idx=space_idx,
-                                is_byte=is_bytes,
-                                byte_ids=byte_ids)
+                aug = Antspeak(is_byte=is_bytes)
             elif aug == "ngrams":
-                aug = NGrams(disallowed_repeats=punctuation,
-                            space_idx=space_idx,
-                            is_byte=is_bytes,
-                            byte_ids=byte_ids)
+                aug = NGrams(is_byte=is_bytes)
             elif aug == "hashtag":
-                if is_bytes:
-                    hashtag_idx = 35
-                elif is_visual:
-                    hashtag_idx = "#"
-                else:
-                    hashtag_idx = vocab.get('#', 0)
-                aug = Hashtags(hashtag_idx=hashtag_idx, 
-                                    space_idx=space_idx,
-                                    punctuation=punctuation,
-                                    capitals=capitals,
-                                    lowers=lowers,
-                                    is_byte=is_bytes,
-                                    is_visual=is_visual,
-                                    byte_ids=byte_ids
-                                    )
+                aug = Hashtags(is_byte=is_bytes)
             elif aug == "short":
-                aug = Short(space_idx=space_idx,
-                            is_byte=is_bytes,
-                            byte_ids=byte_ids)
+                aug = Short(is_byte=is_bytes)
             elif aug == "spongebob":
                 aug = Spongebob(
-                    capitals=capitals,
-                    lowers=lowers,
                     is_byte=is_bytes,
-                    is_visual=is_visual,
-                    byte_ids=byte_ids
                 )
             elif aug == "codeswitch":
-                if is_bytes:
-                    space_span = [vocab[str(c)] for c in " ".encode("utf-8")]
-                elif is_visual:
-                    space_span = " "
-                else:
-                    space_span = [vocab.get('[SPACE]', vocab["<unk>"])]
                 aug = Codeswitch(
-                    space_span=space_span,
                     is_byte=is_bytes,
-                    is_visual=is_visual
                 )
+            elif aug == "leetspeak":
+                aug = LeetSpeak(
+                    is_byte=is_bytes,
+                )
+            elif aug == "cyrillic":
+                aug = Cyrillic(
+                    is_byte=is_bytes,
+                )
+            elif aug == "url":
+                aug = URL(
+                    is_byte=is_bytes,
+                )
+            elif aug == "html":
+                aug = HTML(
+                    is_byte=is_bytes,
+                )
+            elif aug == "addemojis":
+                aug = AddEmoji(
+                    is_byte=is_bytes,
+                )
+            elif aug == "replaceemojis":
+                aug = ReplaceEmoji(
+                    is_byte=is_bytes,
+                )
+            elif aug == "delete":
+                aug = Delete(
+                    is_byte=is_bytes,
+                )
+            elif aug == "add":
+                aug = Add(
+                    is_byte=is_bytes,
+                )
+            elif aug == "swap":
+                aug = Swap(
+                    is_byte=is_bytes,
+                )
+            else:
+                print(f"{aug} not supported")
+
             augs.append(aug)
             probs.append(prob)
         total_prob_mass = sum(probs)
@@ -544,6 +553,7 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter
     )
 
+    # this currently is non-functional, ignore it
     parser.add_argument("--raw_data_dir", 
                                         type=str, 
                                         help="The path to raw data. If this is passed, data directory must have a train and valid subfolder.")
@@ -554,6 +564,12 @@ def parse_args():
                                         required=True,
                                         type=str,
                                         help="The path to the directory will output models will be saved")
+    parser.add_argument("--multilabel", action="store_true", 
+                                            default=False,
+                                            help="If set true, the model will be trained as a multilabel classifier")
+    parser.add_argument("--token_level", action="store_true", 
+                                            default=False,
+                                            help="If set true, the model will be trained as a token level classifier")
 
     parser.add_argument("--checkpoint_path",
                                         type=str,
@@ -716,16 +732,20 @@ def parse_args():
 
 def main(args):
 
-    # breakpoint()
-
     train, valid = load_data(args)
 
+    # this currently doesn't hold the optimizer state or training progress,
+    # so it's more intended for finetuning then anything
     if args.checkpoint_path is not None:
         model = load_model(args)
     else:
         model = build_model(args, train)
 
-    processor = build_processor(args, visual=train.visual)
+    labels = [key for key, _ in sorted(train.labels.items(), key=lambda item: item[1])]
+    processor = build_processor(args, 
+                                    vocab=train.vocab,
+                                    labels=labels,
+                                    visual=train.visual)
 
     augmentations = build_augmentations(args, train.vocab, train.bytes, train.visual)
 
