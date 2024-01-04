@@ -9,7 +9,7 @@ import pathlib
 import logging
 import os, sys
 
-if __package__ is None and __name__ == '__main__':
+if (__package__ is None or __package__ == "") and __name__ == '__main__':
     parent = pathlib.Path(__file__).absolute().parents[1]
     sys.path.insert(0, str(parent))
     __package__ = 'lidirl'
@@ -28,12 +28,14 @@ logger = logging.getLogger("lidirl")
 import argparse
 import torch
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 import json
 
 from . import __version__
 from .utils import get_model_path, list_models, MODELS
 from .models import CLD3Model, RoformerModel, TransformerModel, ConvModel, FlashModel
-from .preprocessor import Processor, NGramProcessor, TrainingShard
+from .dataloader import VisRepProcessor
+# from .preprocessor import Processor, NGramProcessor, TrainingShard, VisRepProcessor
 
 class DefaultArgs():
     """
@@ -42,11 +44,12 @@ class DefaultArgs():
     def __init__(self):
         pass
 
-def load_from_checkpoint(checkpoint_path : str, data_path: str):
+def load_from_checkpoint(checkpoint_path : str):
     """
         Loads a model from a checkpoint path.
     """
     model_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    processor = None
     if model_dict["model_type"] == "linear-ngram":
         model = CLD3Model(vocab_size=model_dict['vocab_size'],
                             embedding_dim=model_dict['embedding_dim'],
@@ -54,23 +57,30 @@ def load_from_checkpoint(checkpoint_path : str, data_path: str):
                             label_size=model_dict['label_size'],
                             num_ngram_orders=model_dict['num_ngram_orders'],
                             montecarlo_layer=model_dict['montecarlo_layer'])
-        processor = NGramProcessor(
-            ngram_orders=model_dict['processor']['ngram_orders'],
-            num_hashes=model_dict['processor']['num_hashes'],
-            max_hash_value=model_dict['processor']['max_hash_value']
-        )
+        # processor = NGramProcessor(
+        #     ngram_orders=model_dict['processor']['ngram_orders'],
+        #     num_hashes=model_dict['processor']['num_hashes'],
+        #     max_hash_value=model_dict['processor']['max_hash_value']
+        # )
     elif model_dict["model_type"] == "transformer":
         model = TransformerModel(
             vocab_size=model_dict["vocab_size"],
             embedding_dim=model_dict["embedding_size"],
+            hidden_dim=model_dict["hidden_dim"],
             label_size=model_dict["label_size"],
             num_layers=model_dict["num_layers"],
             max_len=model_dict["max_length"],
             nhead=model_dict["nhead"],
-            montecarlo_layer=model_dict['montecarlo_layer']
+            montecarlo_layer=model_dict['montecarlo_layer'],
+            visual_inputs=model_dict['input_type'] == "visual",
+            convolutions=model_dict["convolutions"]
         )
-        data = json.load(open(data_path))
-        processor = Processor(vocab=data['vocab'], labels=data['labels'])
+        if model_dict['input_type'] == "visual":
+            processor = VisRepProcessor() 
+        else:
+            processor = None
+            # processor = Processor(vocab=model_dict['vocab'], labels=model_dict['labels'])
+
     elif model_dict["model_type"] == "roformer":
         model = RoformerModel(
                     vocab_size=model_dict["vocab_size"],
@@ -83,34 +93,15 @@ def load_from_checkpoint(checkpoint_path : str, data_path: str):
                     dropout=model_dict["dropout"],
                     montecarlo_layer=model_dict['montecarlo_layer']
         )
-        data = json.load(open(data_path))
-        processor = Processor(vocab=data['vocab'], labels=data['labels'])
-    elif model_dict["model_type"] == "convolutional":
-        model = ConvModel(vocab_size=model_dict["vocab_size"],
-                            label_size=model_dict["label_size"],
-                            embedding_dim=model_dict["embedding_size"],
-                            conv_min_width=model_dict["conv_min_width"],
-                            conv_max_width=model_dict["conv_max_width"],
-                            montecarlo_layer=model_dict['montecarlo_layer'])
-        processor = Processor()
-    elif model_dict["model_type"] == "flashmodel":
-        model = FlashModel(
-                    vocab_size=model_dict["vocab_size"],
-                    embedding_dim=model_dict["embedding_dim"],
-                    hidden_dim=model_dict["hidden_dim"],
-                    label_size=model_dict["label_size"],
-                    num_layers=model_dict["num_layers"],
-                    max_len=model_dict["max_len"],
-                    nhead=model_dict["nhead"],
-                    dropout=model_dict["dropout"],
-                    use_rotary=model_dict["use_rotary"],
-                    montecarlo_layer=model_dict['montecarlo_layer'])
-        processor = Processor()
+        if model_dict['visual']:
+            processor = VisRepProcessor(labels=labels) 
+        else:
+            processor = Processor(vocab=model_dict['vocab'], labels=model_dict['labels'])
     model.load_state_dict(model_dict['weights'])
     model.eval()
     vocab = model_dict["vocab"]
     labels = model_dict["labels"]
-    return model, vocab, labels, processor
+    return model, vocab, labels, processor, model_dict['input_type'], model_dict['pred_type']
 
 
 class EvalModel():
@@ -124,10 +115,12 @@ class EvalModel():
             :param model_path: path to the model checkpoint
             :param args: arguments from command line
         """
-        model, vocab, labels, processor = load_from_checkpoint(model_path, args.dataset)
+        model, vocab, labels, processor, input_type, pred_type = load_from_checkpoint(model_path)
         self.model = model
         self.vocab = vocab
         self.labels = labels
+        self.input_type = input_type
+        self.pred_type = pred_type
         self.itos = ["" for _ in labels]
         for l in labels:
             self.itos[labels[l]] = l
@@ -135,7 +128,7 @@ class EvalModel():
         self.args = args
         self.top = args.top
 
-    def label_file(self, input_file, output_file, device, multilabel=False):
+    def label_file(self, input_file, output_file, device):
         """
             Takes input file and writes labels to output (can still be stdin/stdout)
         """
@@ -144,17 +137,17 @@ class EvalModel():
         self.model = self.model.to(device)
 
         # treats input file the same as a training data shard with processing/batching
-        data = self.build_shard(input_file)
-        # breakpoint()
-        for labels, texts in data.get_batch(self.args.batch_size):
+        batches = self.batches(input_file, batch_size = self.args.batch_size)
+
+        for inputs in batches:
             # labels are actually just unks but to follow pipeline we keep them
             # labels = torch.tensor(labels, dtype=torch.long)
-            inputs, labels = self.processor(texts, labels, device)
 
+            inputs = inputs.to(device)
             # see what it says
             output = self.model(inputs)
 
-            if multilabel:
+            if self.pred_type == "multilabel":
                 probs = F.sigmoid(output)
             else:
                 probs = F.softmax(output, dim=-1)
@@ -185,30 +178,29 @@ class EvalModel():
                     langid_index = id.item()
                     prob = prediction[langid_index].item()
                     output_line += f"{self.itos[langid_index]} {prob:.3f}\t"
-                # langid_index = torch.argmax(prediction).item()
-                # prob = prediction[langid_index].item()
-                # output_line = f'{self.itos[langid_index]}\t{prob}'
                 outputs.append(output_line.strip())
         return outputs
 
-    def build_shard(self, input_file):
-        """
-            Builds out the input data the same as training data.
-        """
-        data = TrainingShard()
-        langid = [self.labels.get('<unk>', 0)]
+    def batches(self, input_file, batch_size=25):
+        batch = []
         for line in input_file:
-            if len(line.strip().split()) > 0:
-                # line = [l for l in line.strip()]
-                # text = []
-                # for t in line:
-                    # text.append(self.vocab.get(t, 0))
-                    # t = '[SPACE]' if t == ' ' else t
-                    # text.append(self.vocab.get(t, 0))
-                data.add_example(langid, line.strip())
+            line = line.strip()
+            if len(line) == 0:
+                line = " "
+            if self.input_type == "bytes":
+                batch.append(torch.tensor([_ for _ in line.encode('utf-8')]))
+            elif self.input_type == "characters":
+                batch.append(torch.tensor([_ for _ in line]))
             else:
-                data.add_example(langid, [0 for _ in range(10)])
-        return data
+                batch.append(torch.tensor([self.vocab.get(_, self.processor.build_image(_)) for _ in line]))
+            if len(batch) == batch_size:
+                padded_texts = pad_sequence(batch, batch_first=True, padding_value=self.vocab["[PAD]"])
+                yield padded_texts
+                batch = []
+        if len(batch) > 0:
+            padded_texts = pad_sequence(batch, batch_first=True, padding_value=self.vocab["[PAD]"])
+            yield padded_texts
+        
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -220,7 +212,6 @@ def parse_args():
 
     parser.add_argument('--model', '-m', default=None,
                             help="Either name of or path to a pretrained model")
-    parser.add_argument('--dataset')
     parser.add_argument('--input', '-i', default=None,
                             help="Input file. Defaults to stdin.")
     parser.add_argument('--output', '-o', default=None,
@@ -284,7 +275,7 @@ def main():
     args = parse_args()
 
     if args.version:
-        print("libirl", __version__)
+        print("lidirl", __version__)
         sys.exit(0)
 
     if args.download:

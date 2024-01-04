@@ -78,39 +78,33 @@ class Results():
         self.validations = 0
         self.type = type
 
-    def calculate(self, loss, ppl, y_hat, labels, token_level):
+    def calculate(self, loss, ppl, y_hat, targets, input_type):
         self.total_loss += loss
         self.perplexity += ppl
-        if token_level:
-            for label, y_h in zip(labels, y_hat):
+        if input_type == "token_level":
+            for target, y_h in zip(targets, y_hat):
                 if self.type == "VALIDATION":
-                    length = label.shape[0]
-                    self.binary_accuracy.update(y_h[:length, :], label)
-                    if self.calibration_error.update(y_h[:length, :], label) == -1:
+                    length = target.shape[0]
+                    self.binary_accuracy.update(y_h[:length, :], target)
+                    if self.calibration_error.update(y_h[:length, :], target) == -1:
                         return -1
-                    # self.kl_loss += F.kl_div(y_h[:], label, reduction="batchmean").item()
-                self.num_pred += label.shape[0]
-                # for y_h, l in zip(y_hat.transpose(0, 1), labels.transpose(0, 1)):
-                #     if self.type == "VALIDATION":
-                #         # self.fuzzy_accuracy.update(y_h, l)
-                #         if self.calibration_error.update(y_h, l) == -1:
-                #             return -1
-                #self.brier_score.update(y_h, l)
-                # self.num_pred += l.shape[0]
+                self.num_pred += target.shape[0]
         else:
             if self.type == "VALIDATION":
                 
-                targets = labels > 0
-                # self.fuzzy_accuracy.update(y_hat, targets)
-                
-                targets = torch.argmax(labels, dim=1)
-                self.binary_accuracy.update(y_hat, targets)
-                if self.calibration_error.update(y_hat, targets) == -1:
+                if input_type == "multilabel":
+                    labels = targets > 0
+                    # self.fuzzy_accuracy.update(y_hat, targets)
+                else:
+                    labels = torch.argmax(targets, dim=1)
+
+                self.binary_accuracy.update(y_hat, labels)
+                if self.calibration_error.update(y_hat, labels) == -1:
                     return -1
-                self.kl_loss += F.kl_div(y_hat, labels, reduction="batchmean").item()
+                self.kl_loss += F.kl_div(y_hat, targets, reduction="batchmean").item()
                 
             #self.brier_score.update(y_hat, labels)
-            self.num_pred += labels.shape[0]
+            self.num_pred += targets.shape[0]
         self.batches += 1
 
     def get_results(self, lr, completed=1):

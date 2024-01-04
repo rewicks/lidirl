@@ -4,6 +4,7 @@ from re import M
 import logging
 import time
 import math
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,15 +21,12 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
 
 from . import __version__
 from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
-from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, FlashModel
-from .augmentations import Antspeak, Hashtags, NGrams, \
-                                Spongebob, Short, Codeswitch, \
-                                LeetSpeak, Cyrillic, HTML, URL, \
-                                AddEmoji, ReplaceEmoji, \
-                                Delete, Add, Swap \
+from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical
 
 from .metrics import Results
 from .logger import TrainingLogger
+from .dataloader import build_datasets
+from .augmentations import build_augmentations
 
 ######################################################################################
 
@@ -43,13 +41,24 @@ logger = logging.getLogger("lidirl")
 ######################################################################################
 
 
-def save_model(model, model_type, dataset, processor, output_path, bytes, training_status, scheduler, optimizer, device=None, log_output=None):
+def save_model(model, 
+                    model_type, 
+                    input_type,
+                    pred_type,
+                    dataset, 
+                    output_path,
+                    training_status,
+                    scheduler,
+                    optimizer,
+                    vocab,
+                    labels,
+                    device=None, log_output=None):
     model = model.cpu()
-    model_dict = model.save_object()
-    model_dict['processor'] = processor.save_object()
-    model_dict['labels'] = dataset.labels
-    model_dict['vocab'] = dataset.vocab
-    model_dict['bytes'] = bytes
+    model_dict = model.module.save_object() if type(model) is nn.DataParallel else model.save_object()
+    model_dict['pred_type'] = pred_type
+    model_dict['labels'] = labels
+    model_dict['vocab'] = vocab
+    model_dict['input_type'] = input_type
     model_dict['model_type'] = model_type
     model_dict["training_status"] = training_status
     model_dict["scheduler"] = scheduler
@@ -57,26 +66,19 @@ def save_model(model, model_type, dataset, processor, output_path, bytes, traini
     torch.save(model_dict, output_path)
     model = model.to(device)
 
-def load_model(model_path, device=torch.device('cpu')):
-    model_dict = torch.load(model_path)
-    
-    optimizer = torch.optim.Adam()
 
 class Trainer():
-    def __init__(self, args, train, valid, model, processor, augmentations):
+    def __init__(self, args, train, valid, model, vocab, labels):
         self.with_cuda = torch.cuda.is_available() and not args.cpu
         self.device = torch.device("cuda:0" if self.with_cuda else "cpu")
         logger.info(f"Training on device: {self.device}")
 
         self.output_path = args.output_path
-        self.max_tokens = args.max_tokens
 
         self.train_dataset = train
-        self.train_dataset.set_batch_size(args.max_tokens)
-
         self.validation_dataset = valid
-        for v in self.validation_dataset:
-            v.set_batch_size(args.max_tokens)
+        self.vocab = vocab
+        self.labels = labels
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
@@ -84,24 +86,22 @@ class Trainer():
         self.model = model.to(self.device)
         logger.info(self.model)
 
-        self.processor = processor
-        
-        self.augmentations = augmentations
-        self.augmentation_prob = args.augmentation_probability
-
-        if args.multilabel:
+        if args.pred_type == "multilabel":
             self.criterion = nn.BCELoss()
         else:
-            self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1, reduction='sum')
+            
         self.lr = args.lr
-        self.warmup_lr = args.warmup_lr
-        if args.warmup_lr is not None and args.warmup_updates is not None:
-            self.warmup_updates = args.warmup_updates
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.warmup_lr)
-        else:
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        # self.warmup_lr = args.warmup_lr
+        # self.warmup_updates = args.warmup_updates
+
+        # lr = self.warmup_lr if (args.warmup_lr is not None and args.warmup_updates is not None) else self.lr
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         self.optimizer.zero_grad()
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1.0, gamma=0.95)
+
+        # if self.args.warmup_lr is not None and self.args.warmup_updates is not None:
+        #     scheduler = LinearLR(self.optimizer, total_iters=args.warmup_updates)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 500, gamma=0.99)
 
         total_params = sum([p.numel() for p in self.model.parameters()])
         logger.info(f'Training with: {total_params} total parameters')
@@ -114,7 +114,7 @@ class Trainer():
 
         # keeps track of all metrics and logging information
         self.results = Results(time.time(), 
-                                num_labels=len(self.train_dataset.labels),
+                                num_labels=len(self.labels),
                                 length=len(self.train_dataset), 
                                 device=self.device)
         self.iswarm = False
@@ -131,56 +131,47 @@ class Trainer():
         self.num_updates = 0
 
     def run_epoch(self, args, epoch=0):
-        completed = 0
-        for batch_index, (labels, texts) in self.train_dataset.enumerate(self.augmentations, self.augmentation_prob):
+        for batch_index, (texts, targets) in enumerate(self.train_dataset, 1):
             try:
-                completed += len(labels)
-                inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes, token_level=args.token_level)
-                if args.multilabel:
-                    for label in labels:
-                        label[label > 0] = 1
-                        
-                output = self.model(inputs)
-                if not args.multilabel:
-                    output = F.log_softmax(output, dim=-1)
-                else:
-                    output = F.sigmoid(output)
+                # multilabel means that every target class with greater than 0 prob should be correct label
+                if args.pred_type == "multilabel":
+                    for trg in targets:
+                        targets[trg > 0] = 1
 
-                # probs = torch.exp(output)
-                if args.model == "unet" or args.token_level:
+                inputs = texts.to(self.device)
+                targets = targets.to(self.device)
+
+                output = self.model(inputs) # raw logits
+                
+                # multiabel--there should be some threshold logic here, but alas
+                # by default, we'll just use sigmoid (0.5 threshold)
+                if args.pred_type == "multilabel":
+                    output = F.sigmoid(output)
+                    labels = targets
+
+                # traditional, multiclass classifier
+                else:
+                    # cross entropy criterion expects no softmax applied so we leave output as is
+                    labels = torch.argmax(targets, dim=1)
+
+                # token level outputs
+                if args.model == "unet" or args.pred_type == "token_level":
                     loss = 0
                     ppl = 0
-                    for b, label in enumerate(labels):
-                        for o, l in zip(output[b], label):
-                            # for o, l in zip(output.transpose(0,1), labels.transpose(0,1)):
-                            loss += self.criterion(o, l)
-                            ppl += torch.exp(F.cross_entropy(o, l)).item() 
-                    # running_loss += loss
-                    # self.optimizer.zero_grad()
-                    # loss.backward()
+                    for b, trg in enumerate(targets):
+                        for o, t in zip(output[b], trg):
+                            loss += self.criterion(o, t)
+                            ppl += torch.exp(F.cross_entropy(o, t)).item() 
                     
                 else:
                     loss = self.criterion(output, labels)
-                    # running_loss += loss
-                    # self.optimizer.zero_grad()
-                    # loss.backward()
-                    ppl = torch.exp(F.cross_entropy(output, labels)/args.update_interval).item()
+                    ppl = torch.exp(F.cross_entropy(output, targets)/args.update_interval).item()
 
-                self.results.calculate(loss.item()/args.update_interval, ppl, output, labels, args.token_level)
-
-                if not self.iswarm and args.warmup_updates is not None and batch_index / args.update_interval > args.warmup_updates:
-                    logger.info(f"Model is warmed up. Now changing learning rate to {self.lr}")
-                    for g in self.optimizer.param_groups:
-                        g['lr'] = self.lr
-                    self.iswarm = True
-
-                # self.optimizer.zero_grad()
-                # loss.backward()
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
-                # self.optimizer.step()
-                # self.num_updates += 1
+                # keep track of metrics for eventually logging
+                self.results.calculate(loss.item()/args.update_interval, ppl, output, targets, args.pred_type == "token_level")
 
 
+                # update intervals are for effective batch sizes
                 loss /= args.update_interval
                 loss.backward()
 
@@ -191,17 +182,17 @@ class Trainer():
                 }
 
                 if batch_index % args.update_interval == 0:
-                    # breakpoint()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+                    self.scheduler.step() # I'm not stepping every epoch bc twitter is quite large---steps every 500 updates in __init__
                     self.num_updates += 1
                     if self.num_updates == args.max_updates:
                         logger.info(f"Reached maximum number of updates ({args.max_updates}) for training. Stopping.")
                         return 0
 
                 if (batch_index) % (args.log_interval * args.update_interval) == 0:
-                    batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=completed)
+                    batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=batch_index+1)
                     self.train_log.log(batch_results)
                     self.results.reset(time.time())
 
@@ -213,28 +204,32 @@ class Trainer():
                         if validation_results['accuracy'] > self.best_model['accuracy']:
                             self.best_model = validation_results
                             save_model(self.model, 
-                                            args.model, 
+                                            args.model,
+                                            args.input_type,
+                                            args.pred_type,
                                             self.train_dataset, 
-                                            self.processor, 
                                             os.path.join(self.output_path, 'checkpoint_best.pt'), 
-                                            self.train_dataset.bytes,
                                             training_status=training_status,
                                             scheduler=self.scheduler,
                                             optimizer=self.optimizer,
-                                            device=self.device, 
+                                            vocab=self.vocab,
+                                            labels=self.labels,
+                                            device=self.device,
                                             log_output=self.best_model)
                             logger.info(f"Improved accuracy of {validation_results['accuracy']}")
                         elif validation_results['total_loss'] < self.best_model['total_loss']:
                             self.best_model = validation_results
                             save_model(self.model, 
-                                            args.model, 
+                                            args.model,
+                                            args.input_type,
+                                            args.pred_type,
                                             self.train_dataset, 
-                                            self.processor, 
                                             os.path.join(self.output_path, 'checkpoint_best.pt'),
-                                            self.train_dataset.bytes, 
                                             training_status=training_status,
                                             scheduler=self.scheduler,
                                             optimizer=self.optimizer,
+                                            vocab=self.vocab,
+                                            labels=self.labels,
                                             device=self.device, 
                                             log_output=self.best_model)
                             logger.info(f"Improved loss of {validation_results['total_loss']}")
@@ -247,26 +242,30 @@ class Trainer():
                     else:
                         self.best_model = validation_results
                         save_model(self.model, 
-                                        args.model, 
+                                        args.model,
+                                        args.input_type,
+                                        args.pred_type,
                                         self.train_dataset, 
-                                        self.processor, 
                                         os.path.join(self.output_path, 'checkpoint_best.pt'), 
-                                        self.train_dataset.bytes, 
                                         training_status=training_status,
                                         scheduler=self.scheduler,
                                         optimizer=self.optimizer,
+                                        vocab=self.vocab,
+                                        labels=self.labels,
                                         device=self.device, 
                                         log_output=self.best_model)
                     if args.checkpoint_last:
                         save_model(self.model, 
-                                        args.model, 
+                                        args.model,
+                                        args.input_type,
+                                        args.pred_type,
                                         self.train_dataset, 
-                                        self.processor, 
                                         os.path.join(self.output_path, 'checkpoint_last.pt'),
-                                        self.train_dataset.bytes,
                                         training_status=training_status,
                                         scheduler=self.scheduler,
                                         optimizer=self.optimizer, 
+                                        vocab=self.vocab,
+                                        labels=self.labels,
                                         device=self.device, 
                                         log_output=self.best_model)
             except RuntimeError as e:
@@ -279,14 +278,16 @@ class Trainer():
                     raise Exception(e)
         if args.save_every_epoch:
             save_model(self.model, 
-                            args.model, 
+                            args.model,
+                            args.input_type,
+                            args.pred_type,
                             self.train_dataset, 
-                            self.processor, 
                             os.path.join(self.output_path, f'epoch{epoch}.pt'), 
-                            self.train_dataset.bytes,
                             training_status=training_status,
                             scheduler=self.scheduler,
                             optimizer=self.optimizer,
+                            vocab=self.vocab,
+                            labels=self.labels,
                             device=self.device,
                             log_output=self.best_model)
         return 1
@@ -294,82 +295,58 @@ class Trainer():
 
 
     def validate(self, args, validation_num=0):
-        # breakpoint()
         torch.cuda.empty_cache()
         ret_results = {}
         accs = []
         losses = []
         self.model.eval()
-        for val in self.validation_dataset:
+        for name, val in self.validation_dataset.items():
             valid_results = Results(time.time(), 
-                                        num_labels=len(val.labels),
+                                        num_labels=len(self.labels),
                                         length=len(self.validation_dataset),
                                         device=self.device,
                                         type='VALIDATION')
             with torch.no_grad():
-                for batch_index, (labels, texts) in val.enumerate():
-                    # breakpoint()
-                    inputs, labels = self.processor(texts, labels, self.device, is_bytes=self.train_dataset.bytes, token_level=args.token_level)
-                    # labels = labels.to(self.device)
+                for batch_index, (texts, targets) in enumerate(val, 1):
+                    inputs = texts.to(self.device)
+                    targets = targets.to(self.device)
                     output = self.model(inputs)
 
-                    if not args.multilabel:
-                        output = F.log_softmax(output, dim=-1)
+                    if args.pred_type != "multilabel":
+                        labels = torch.argmax(targets, dim=1)
                     else:
+                        labels = targets
                         output = F.sigmoid(output)
 
-                    if args.model == "unet" or args.token_level:
+                    if args.model == "unet" or args.pred_type == "token_level":
                         loss = 0
                         ppl = 0
-                        for b, label in enumerate(labels):
-                            for i, o, l in zip(inputs[b], output[b], label):
-                                loss += self.criterion(o, l).item()
-                                ppl += torch.exp(F.cross_entropy(o, l)).item()
+                        for b, target in enumerate(targets):
+                            for i, o, t in zip(inputs[b], output[b], target):
+                                loss += F.cross_entropy(o, t, reduce=False).item()
+                                ppl += torch.exp(F.cross_entropy(o, t)).item()
                     else:
-                        loss = self.criterion(output, labels).item()
-                        ppl = torch.exp(F.cross_entropy(output, labels)).item()
+                        loss = F.cross_entropy(output, targets, reduction='sum').item()
+                        ppl = math.exp(loss)
 
-                    probs = torch.exp(output)
+                    probs = F.softmax(output, dim=1)
 
-                    valid_results.calculate(loss, ppl, probs, labels, args.token_level)
-            ret_results[val.group_name] = {}
+                    valid_results.calculate(loss, ppl, probs, targets, args.pred_type == "token_level")
+            ret_results[name] = {}
             for key, value in valid_results.get_results(self.optimizer.param_groups[0]['lr']).items():
                 if key in ["accuracy", "total_loss", "ppl_per_pred", "num_pred"]:
-                    ret_results[val.group_name][key] = value
+                    ret_results[name][key] = value
                 else:
                     ret_results[key] = value
-            accs.append(ret_results[val.group_name]["accuracy"])
-            losses.append(ret_results[val.group_name]["total_loss"])
+            accs.append(ret_results[name]["accuracy"])
+            losses.append(ret_results[name]["total_loss"])
         ret_results["validation_num"] = validation_num
         ret_results["accuracy"] = mean(accs)
-        ret_results["total_loss"] = mean(losses)
+        ret_results["total_loss"] = sum(losses)
         self.model.train()
         return ret_results
 
 ############################################ BUILDING AND LOADING UTILS ############################################
-
-def load_data(args):
-    if not os.path.exists(args.preprocessed_data_dir):
-        logger.error(f"Data directory at {args.preprocessed_data_dir} does not exist. Please preprocess the data.")
-        sys.exit(-1)
-    else:
-        train_data =  Dataset(args.preprocessed_data_dir, type="train")
-        train_data.load()
-
-        valid_data = []
-        for d, s, f in os.walk(args.preprocessed_data_dir):
-            for fi in f:
-                if "valid" in fi:
-                    if len(fi.split('.')) > 2:
-                        group = fi.split(".")[1]
-                    else:
-                        group = None
-                    split = Dataset(args.preprocessed_data_dir, type="valid", group_name=group)
-                    split.load()
-                    valid_data.append(split)
-
-    return train_data, valid_data
-
 
 def load_model(args):
     logger.info(f"Loading pre-existing model from checkpoint at {args.checkpoint_path}")
@@ -377,39 +354,44 @@ def load_model(args):
         logger.error(f"Checkpoint not found at {args.checkpoint_path}")
     pass
 
-def build_model(args, dataset):
+def build_model(args, vocab, labels):
+
+    visual = True if args.input_type == "visual" else False
+    token_level = True if args.pred_type == "token_level" else False
+
     if args.model == "linear-ngram":
         ngram_orders = [int(n) for n in args.ngram_orders.split(',')]
         model = CLD3Model(vocab_size=args.max_hash_value * len(ngram_orders),
                                     hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
-                                    label_size=len(dataset.labels.keys()),
+                                    label_size=len(labels),
                                     num_ngram_orders=len(ngram_orders),
                                     montecarlo_layer=args.montecarlo_layer)
     elif args.model == "transformer":
-        model = TransformerModel(vocab_size=len(dataset.vocab),
+        model = TransformerModel(vocab_size=len(vocab),
                                     hidden_dim=args.hidden_dim,
                                     embedding_dim=args.embedding_dim,
-                                    label_size=len(dataset.labels.keys()),
+                                    label_size=len(labels.keys()),
                                     num_layers=args.num_layers,
                                     max_len=args.max_length,
                                     nhead=args.nhead,
                                     montecarlo_layer=args.montecarlo_layer,
-                                    visual_inputs=dataset.visual)
+                                    visual_inputs=visual,
+                                    convolutions=[1] + [int(_) for _ in args.convolutions.split(',')])
     elif args.model == "roformer":
-        model = RoformerModel(vocab_size=len(dataset.vocab),
+        model = RoformerModel(vocab_size=len(vocab),
                                     embedding_dim=args.embedding_dim,
                                     hidden_dim=args.hidden_dim,
-                                    label_size=len(dataset.labels.keys()),
+                                    label_size=len(labels),
                                     num_layers=args.num_layers,
                                     max_len=args.max_length,
                                     nhead=args.nhead,
                                     dropout=args.dropout,
                                     montecarlo_layer=args.montecarlo_layer,
-                                    token_level=args.token_level)
+                                    token_level=token_level)
     elif args.model == "convolutional":
-        model = ConvModel(vocab_size=len(dataset.vocab),
-                            label_size=len(dataset.labels.keys()),
+        model = ConvModel(vocab_size=len(vocab),
+                            label_size=len(labels),
                             embedding_dim=args.embedding_dim,
                             conv_min_width=args.conv_min_width,
                             conv_max_width=args.conv_max_width,
@@ -417,134 +399,25 @@ def build_model(args, dataset):
                             montecarlo_layer=args.montecarlo_layer)
 
     elif args.model == "unet":
-        model = UNETModel(vocab_size=len(dataset.vocab),
-                            label_size=len(dataset.labels.keys()),
+        model = UNETModel(vocab_size=len(vocab),
+                            label_size=len(labels),
                             embed_size=args.embedding_dim,
                             montecarlo_layer=args.montecarlo_layer
         )
-    elif args.model == "flash":
-        model = FlashModel(
-            vocab_size=len(dataset.vocab),
-            embedding_dim=args.embedding_dim,
-            hidden_dim=args.hidden_dim,
-            label_size=len(dataset.labels.keys()),
-            num_layers=args.num_layers,
-            max_len=args.max_length,
-            nhead=args.nhead,
-            dropout=args.dropout,
-            montecarlo_layer=args.montecarlo_layer,
-            use_rotary=args.use_rotary,
+    elif args.model == "hierarchical":
+        model = Hierarchical(
+                    vocab_size=len(vocab),
+                    label_size=len(labels),
+                    window_size=args.window_size,
+                    stride=args.stride,
+                    embed_dim=args.embedding_dim,
+                    hidden_dim=args.hidden_dim,
+                    nhead=args.nhead,
+                    max_length=args.max_length,
+                    num_layers=args.num_layers,
         )
 
     return model
-
-def build_processor(args, vocab, labels, visual=False):
-    if args.model == "linear-ngram":
-        logger.info("Buildling an NGramProcessor for an Ngram Linear Model")
-        processor = NGramProcessor(
-            ngram_orders=[int(n) for n in args.ngram_orders.split(',')],
-            num_hashes=args.num_hashes,
-            max_hash_value=args.max_hash_value,
-        )
-    elif args.model == "transformer":  
-        if visual:
-            logger.info("Building a Visual Processor for a Transformer model")
-            processor = VisRepProcessor(labels=labels) 
-        else:
-            logger.info("Building a base Processor for a Transformer model") 
-            processor = Processor(vocab=vocab,
-                                    labels=labels)
-    elif args.model == "roformer":
-        logger.info("Building a base Processor for a Roformer Model")
-        processor = Processor(vocab=vocab,
-                                    labels=labels)
-    elif args.model == "flash":
-        logger.info("Building a base Processor for a Flash Model")
-        processor = Processor(vocab=vocab,
-                                    labels=labels)
-    elif args.model == "convolutional":
-        logger.info("Building a base Processor for a Convolutional model") 
-        processor = Processor(vocab=vocab,
-                                labels=labels)
-    elif args.model == "unet":
-        logger.info("Building a base Processor for a UNet model") 
-        processor = PaddedProcessor(args.pad_length)     
-    
-    return processor
-
-def build_augmentations(args, vocab, is_bytes, is_visual):
-    if args.augmentations is not None:
-        augs = []
-        probs = []
-
-        for aug in args.augmentations.split('/'):
-            aug = aug.split(',')
-            prob = float(aug[1])
-            aug = aug[0]
-            if aug == "antspeak":
-                aug = Antspeak(is_byte=is_bytes)
-            elif aug == "ngrams":
-                aug = NGrams(is_byte=is_bytes)
-            elif aug == "hashtag":
-                aug = Hashtags(is_byte=is_bytes)
-            elif aug == "short":
-                aug = Short(is_byte=is_bytes)
-            elif aug == "spongebob":
-                aug = Spongebob(
-                    is_byte=is_bytes,
-                )
-            elif aug == "codeswitch":
-                aug = Codeswitch(
-                    is_byte=is_bytes,
-                )
-            elif aug == "leetspeak":
-                aug = LeetSpeak(
-                    is_byte=is_bytes,
-                )
-            elif aug == "cyrillic":
-                aug = Cyrillic(
-                    is_byte=is_bytes,
-                )
-            elif aug == "url":
-                aug = URL(
-                    is_byte=is_bytes,
-                )
-            elif aug == "html":
-                aug = HTML(
-                    is_byte=is_bytes,
-                )
-            elif aug == "addemojis":
-                aug = AddEmoji(
-                    is_byte=is_bytes,
-                )
-            elif aug == "replaceemojis":
-                aug = ReplaceEmoji(
-                    is_byte=is_bytes,
-                )
-            elif aug == "delete":
-                aug = Delete(
-                    is_byte=is_bytes,
-                )
-            elif aug == "add":
-                aug = Add(
-                    is_byte=is_bytes,
-                )
-            elif aug == "swap":
-                aug = Swap(
-                    is_byte=is_bytes,
-                )
-            else:
-                print(f"{aug} not supported")
-
-            augs.append(aug)
-            probs.append(prob)
-        total_prob_mass = sum(probs)
-        augmentations = []
-        for a, p in zip(augs, probs):
-            augmentations.append((a, p/total_prob_mass))
-        return augmentations
-    return None
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -554,36 +427,45 @@ def parse_args():
     )
 
     # this currently is non-functional, ignore it
-    parser.add_argument("--raw_data_dir", 
-                                        type=str, 
-                                        help="The path to raw data. If this is passed, data directory must have a train and valid subfolder.")
-    parser.add_argument("--preprocessed_data_dir",
+    parser.add_argument("--train_files", nargs='+',
                                         type=str,
-                                        help="The path to the directory where the data is located. This must be the output of the preprocess call")
+                                        help="The path to the training data.")
+    parser.add_argument("--valid_files", nargs='+',
+                                        type=str,
+                                        help="The path to the validation data.")
+    parser.add_argument('--smart_group_validation_files', default=False, action="store_true",
+                            help="If passed, will group validation sets into separately logged clusters based on each file's parent directory")
+
     parser.add_argument("--output_path", 
                                         required=True,
                                         type=str,
                                         help="The path to the directory will output models will be saved")
-    parser.add_argument("--multilabel", action="store_true", 
-                                            default=False,
-                                            help="If set true, the model will be trained as a multilabel classifier")
-    parser.add_argument("--token_level", action="store_true", 
-                                            default=False,
-                                            help="If set true, the model will be trained as a token level classifier")
-
-    parser.add_argument("--checkpoint_path",
-                                        type=str,
-                                        default=None,
-                                        help="The checkpoint file to continue training from.")
-
-    parser.add_argument("--max_tokens", 
+    parser.add_argument("--input_type", 
+                                            default="characters",
+                                            type=str,
+                                            choices=["characters", "bytes", "visual"],
+                                            help="The type of input to the model.")
+    parser.add_argument("--pred_type", 
+                                            default="multiclass",
+                                            choices=["multiclass", "multilabel", "token_level"],
+                                            help="The type of prediction the model will make")
+    parser.add_argument("--temperature",
+                                            default=0.3,
+                                            type=float,
+                                            help="The temperature alpha to use for dataset sampling.")
+    parser.add_argument("--batch_size", 
                                         type=int,
-                                        default=2000,
-                                        help="The batch size in tokens")
+                                        default=25,
+                                        help="The batch size in examples")
     parser.add_argument("--tb_dir", 
                                         type=str,
                                         default=None,
                                         help="The directory path to save tensorboard files")
+
+    parser.add_argument("--num_workers",
+                                        type=int,
+                                        default=1,
+                                        help="The number of workers to use for data loading")
 
     parser.add_argument('--warmup_lr', 
                                         type=float,
@@ -671,9 +553,10 @@ def parse_args():
                                 type=str,
                                 help="A comma separated list of augmentation (names) and their ratios.")
     parser.add_argument("--augmentation_probability",
-                                default=0.2,
+                                default=0.0,
                                 type=float,
                                 help="The probability of augmenting data.")
+    parser.add_argument('--seed', type=int, default=141414)
 
     parser.add_argument("--wandb_proj", default=None, type=str, help="The project where this run will be logged")
     parser.add_argument("--wandb_run", default=None, type=str, help="The name of the run for wandb logging")
@@ -701,6 +584,7 @@ def parse_args():
     transformer_parser = subparsers.add_parser("transformer", help="a transformer model")
     transformer_parser.add_argument("--max-length", default=1024, type=int)
     transformer_parser.add_argument("--nhead", default=8, type=int)
+    transformer_parser.add_argument("--convolutions", default="16,32,64", type=str, help="comma separated list of convolution channels")
 
     # A SUBPARSER FOR THE ROFORMER MODEL
     roformer_parser = subparsers.add_parser("roformer", help="a roformer model")
@@ -713,17 +597,15 @@ def parse_args():
     conv_parser.add_argument("--conv_max_width", default=5, type=int)
     conv_parser.add_argument("--conv_depth", default=64, type=int)
 
-    # A SUBPARSER FOR THE FLASH (TESTING) MODEL
-    flash_parser = subparsers.add_parser("flash", help="the new flash model (for testing)")
-    flash_parser.add_argument("--max-length", default=1024, type=int)
-    flash_parser.add_argument("--nhead", default=8, type=int)
-    flash_parser.add_argument("--use_rotary", default=False, action="store_true")
-
     # A SUBPARSER FOR THE UNET MODEL
     unet_parser = subparsers.add_parser("unet", help="a unet model")
     unet_parser.add_argument("--pad_length", default=1024, type=int)
 
-
+    hierachical_parser = subparsers.add_parser("hierarchical", help="a hierarchical model")
+    hierachical_parser.add_argument("--max-length", default=1024, type=int)
+    hierachical_parser.add_argument("--nhead", default=8, type=int)
+    hierachical_parser.add_argument("--window-size", default=8, type=int)
+    hierachical_parser.add_argument("--stride", default=1, type=int)
 
     args = parser.parse_args()
 
@@ -732,28 +614,20 @@ def parse_args():
 
 def main(args):
 
-    train, valid = load_data(args)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
-    # this currently doesn't hold the optimizer state or training progress,
-    # so it's more intended for finetuning then anything
-    if args.checkpoint_path is not None:
-        model = load_model(args)
-    else:
-        model = build_model(args, train)
+    augmentations = build_augmentations(args)
 
-    labels = [key for key, _ in sorted(train.labels.items(), key=lambda item: item[1])]
-    processor = build_processor(args, 
-                                    vocab=train.vocab,
-                                    labels=labels,
-                                    visual=train.visual)
+    train, valid, vocab, labels = build_datasets(args, augmentations)
 
-    augmentations = build_augmentations(args, train.vocab, train.bytes, train.visual)
+    model = build_model(args, vocab, labels)
 
-    trainer = Trainer(args, train, valid, model, processor, augmentations)
+    trainer = Trainer(args, train, valid, model, vocab, labels)
     for ep in range(args.min_epochs):
         logger.info(f"Beginning epoch {ep}")
         epoch_finish = trainer.run_epoch(args, ep)
-        trainer.scheduler.step()
+        # trainer.scheduler.step()
 
     for ep in range(args.min_epochs, args.max_epochs):
         logger.info(f"Beginning epoch {ep}")
@@ -761,7 +635,7 @@ def main(args):
         if epoch_finish == 0:
             logger.info("Finished training")
             break
-        trainer.scheduler.step()
+        # trainer.scheduler.step()
 
     trainer.train_log.finish_log()
 

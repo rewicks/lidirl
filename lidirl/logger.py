@@ -35,6 +35,11 @@ class TrainingLogger():
                 tags = os.getenv("WANDB_RUN_TAGS", default=None)
                 if tags is not None:
                     tags = tags.split(',')
+                try:
+                    wandb.login(key=os.environ.get("WANDB_API_KEY"), force=True)
+                except:
+                    logger.info("No wandb login key found. Using default if logged in.")
+
                 wandb.init(
                     entity="rewicks",
                     project=wandb_config.get("project_name", None),

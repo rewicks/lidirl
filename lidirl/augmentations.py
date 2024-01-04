@@ -5,9 +5,9 @@ Inserts different types of noise to data.
 
 """
 from typing import Optional, Any, Union, Callable, Tuple, List, Dict
-from leetspeak import LEETSPEAK
-from cyrillic import CYRILLIC
-from emoticons import EMOTICONS
+from .leetspeak import LEETSPEAK
+from .cyrillic import CYRILLIC
+from .emoticons import EMOTICONS
 
 ################################ PACKAGING AND LOGGING ################################
 import pathlib
@@ -28,11 +28,66 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lidirl")
 
-#################################### FUNCTIONALITY ####################################
+#################################### IMPORTS ####################################
 
 import random
 import string
 import json
+
+#################################### FUNCTIONALITY ####################################
+
+
+def build_augmentations(args):
+    if args.augmentations is not None:
+        augs = []
+        probs = []
+
+        for aug in args.augmentations.split('/'):
+            aug = aug.split(',')
+            prob = float(aug[1])
+            aug = aug[0]
+            if aug == "antspeak":
+                aug = Antspeak()
+            elif aug == "ngrams":
+                aug = NGrams()
+            elif aug == "hashtag":
+                aug = Hashtags()
+            elif aug == "short":
+                aug = Short()
+            elif aug == "spongebob":
+                aug = Spongebob()
+            elif aug == "codeswitch":
+                aug = Codeswitch()
+            elif aug == "leetspeak":
+                aug = LeetSpeak()
+            elif aug == "cyrillic":
+                aug = Cyrillic()
+            elif aug == "url":
+                aug = URL()
+            elif aug == "html":
+                aug = HTML()
+            elif aug == "addemojis":
+                aug = AddEmoji()
+            elif aug == "replaceemojis":
+                aug = ReplaceEmoji()
+            elif aug == "delete":
+                aug = Delete()
+            elif aug == "add":
+                aug = Add()
+            elif aug == "swap":
+                aug = Swap()
+            else:
+                logger.error(f"{aug} not supported")
+                exit(-1)
+
+            augs.append(aug)
+            probs.append(prob)
+        total_prob_mass = sum(probs)
+        augmentations = []
+        for a, p in zip(augs, probs):
+            augmentations.append((a, p/total_prob_mass))
+        return augmentations
+    return None
 
 def grab_a_span(text : List[int],
                     span_size : int = 3) -> List[int]:
@@ -673,6 +728,9 @@ class Delete(Augmentation):
 
         out = "".join(out)
 
+        if len(out) == 0:
+            out = text
+
         if self.is_byte:
             out = char_to_byte(out)
 
@@ -709,6 +767,7 @@ class Swap(Augmentation):
                 out = out[:-1] + [t] + [out[-1]]
                 
         out = "".join(out)
+
 
         if self.is_byte:
             out = char_to_byte(out)

@@ -25,6 +25,7 @@ logger = logging.getLogger("lidirl")
 
 #################################### FUNCTIONALITY ####################################
 import math
+from collections import OrderedDict
 
 import torch, torchvision
 import torch.nn as nn
@@ -191,6 +192,41 @@ class RoformerModel(nn.Module):
 
 #################################### TRANSFORMER ######################################
 
+class ConvBlock(nn.Module):
+    def __init__(self, embedding_dim : int, conv=None):
+        super(ConvBlock, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.conv = conv
+        layers = []
+        height=32
+        width=32
+        for i, c in enumerate(self.conv[:-1], 1):
+            layers.append((f'conv{i}', nn.Conv2d(c, self.conv[i], kernel_size=3, stride=1)))
+            layers.append((f'bnorm{i}', nn.BatchNorm2d(self.conv[i])))
+            layers.append((f'relu{i}', nn.ReLU()))
+            layers.append((f'maxpool{i}', nn.MaxPool2d(kernel_size=2, stride=2)))
+            layers.append((f'dropout{i}', nn.Dropout(0.5)))
+
+            height = self.output_size(height, 3, 1)
+            height = self.output_size(height, 2, 2)
+
+            width = self.output_size(width, 3, 1)
+            width = self.output_size(width, 2, 2)
+
+        self.embed = nn.Sequential(OrderedDict(layers))
+        self.image_dim = height * width * self.conv[-1]
+        self.proj = nn.Linear(self.image_dim, self.embedding_dim)
+        self.batch_norm = nn.BatchNorm1d(self.embedding_dim)
+
+    def forward(self, inputs):
+        embeds = self.embed(inputs)
+        proj = self.proj(embeds.reshape(inputs.shape[0], -1))
+        return self.batch_norm(proj)
+
+    def output_size(self, length, kernel, stride):
+        num = length - (kernel - 1) - 1
+        return math.floor((num / stride) + 1)
+
 
 class TransformerModel(nn.Module):
     """
@@ -206,22 +242,15 @@ class TransformerModel(nn.Module):
                     nhead : int = 8,
                     roformer : bool = True,
                     montecarlo_layer : bool = False,
-                    visual_inputs : bool = False
+                    visual_inputs : bool = False,
+                    convolutions : list = [1, 16, 32, 64]
                     ):
         super(TransformerModel, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead)
+        encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead, dim_feedforward=hidden_dim)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.convolutions = convolutions
         if visual_inputs:
-            kernel_size = 2
-            self.embed = nn.Sequential(
-                nn.Conv2d(1, embedding_dim, kernel_size, stride=1),
-                nn.ReLU(),
-                nn.Conv2d(embedding_dim, embedding_dim, kernel_size, stride=2),
-                nn.ReLU(),
-                nn.Conv2d(embedding_dim, embedding_dim, kernel_size, stride=2),
-                nn.ReLU(),
-                nn.MaxPool2d(kernel_size=4),
-        )
+            self.embed = ConvBlock(embedding_dim=embedding_dim, conv = convolutions)
         else:
             self.embed = nn.Embedding(vocab_size, embedding_dim)
         self.pos_embed = PositionalEncoding(embed_size=embedding_dim, max_len=max_len)
@@ -234,6 +263,7 @@ class TransformerModel(nn.Module):
 
         self.vocab_size = vocab_size
         self.embedding_size = embedding_dim
+        self.hidden_dim = hidden_dim
         self.label_size = label_size
         self.num_layers = num_layers
         self.max_length = max_len
@@ -246,17 +276,18 @@ class TransformerModel(nn.Module):
             inputs = inputs.t()
             embed = self.embed(inputs)
         else:
-            inputs = inputs[:, :self.max_length, :, :]
+            # batch size x length x 1 x height x width
+            inputs = inputs[:, :self.max_length, :, :, :]
             pad_mask = None
-            inputs = inputs.permute(1, 0, 2, 3)
-            embed = inputs.unsqueeze(2)
-            for e_layer in self.embed:
-                embed = torch.cat([e_layer(_).unsqueeze(0) for _ in embed], dim=0)
-            embed = embed.view(embed.shape[0], embed.shape[1], -1)
+            batch_size, seq_length, _, height, width = inputs.shape
+            inputs = inputs.reshape(-1, 1, height, width)
+            embed = self.embed(inputs).reshape(batch_size, seq_length, -1)
+            embed = embed.transpose(0, 1)
+
         pos_embed = self.pos_embed(embed)
         encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
         output = self.proj(encoding)
-        return F.softmax(output, dim=-1)
+        return output
 
     def get_padding_mask(self, inputs):
         return torch.eq(inputs, 0)
@@ -266,11 +297,13 @@ class TransformerModel(nn.Module):
             "weights": self.state_dict(),
             "vocab_size": self.vocab_size,
             "embedding_size": self.embedding_size,
+            "hidden_dim": self.hidden_dim,
             "label_size": self.label_size,
             "num_layers": self.num_layers,
             "max_length": self.max_length,
             "nhead": self.nhead,
-            "montecarlo_layer": self.montecarlo_layer
+            "montecarlo_layer": self.montecarlo_layer,
+            "convolutions": self.convolutions
         }
         return save
 
@@ -353,6 +386,99 @@ class ConvModel(nn.Module):
             "montecarlo_layer": self.montecarlo_layer
         }
         return save
+
+################################### HIERARCHICAL ######################################
+
+class Hierarchical(nn.Module):
+    def __init__(self, 
+                    vocab_size : int,
+                    label_size : int,
+                    window_size=32,
+                    stride=32,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    nhead=8,
+                    max_length=512,
+                    num_layers=3,
+                    montecarlo_layer = False
+                    ):
+        super().__init__()
+
+        self.embed_layer = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = PositionalEncoding(embed_size=embed_dim, max_len=max_length)
+
+        # Local transformer for attending over windows
+        window_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        self.window_encoder = nn.TransformerEncoder(window_layer, num_layers=num_layers)
+        self.window_size = window_size
+        self.stride = stride # as of now stride is not implemented
+
+        # global transformer for combining outputs of the local transformer
+        encoder_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # noise-aware labels layer or traditional linear projection
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(embed_dim, label_size)
+
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.max_length = max_length
+        self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
+
+    def get_padding_mask(self, inputs):
+        mask = torch.sum(inputs,dim=-1) == 0
+        return mask
+
+    def forward(self, inputs):
+
+        # truncate inputs if too long
+        inputs = inputs[:, :self.max_length]
+
+        # determine how much padding is necessary to make all windows the same length
+        pad_size = self.window_size - (inputs.shape[1] % self.window_size)
+        pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+
+        # add padding to the input
+        inputs = torch.cat((inputs, pads), dim=1)
+
+        # collapse the window sequence length and batch dimensions for parallelization
+        inputs = inputs.view(inputs.shape[0], -1, self.window_size)
+
+        batch_size, seq_len, window_size = inputs.shape
+
+        strides = inputs.reshape(-1, self.window_size).transpose(0, 1)
+        embeds = self.embed_layer(strides)
+        pos_embed = self.pos_embed(embeds)
+        window_encoding = torch.mean(self.window_encoder(pos_embed), dim=0)
+        windows = window_encoding.view(batch_size, seq_len, -1).transpose(0,1)
+
+
+        pos_embed = self.pos_embed(windows)
+        pad_mask = self.get_padding_mask(inputs)
+        encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
+        output = self.proj(encoding)
+        return output
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "embed_dim": self.embed_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size,
+            "window_size": self.window_size,
+            "stride": self.stride,
+            "montecarlo_layer": self.montecarlo_layer,
+            "nhead": self.nhead,
+            "max_length": self.max_length
+        }
+        return save  
+
+
 
 ####################################### UNET ##########################################
 
