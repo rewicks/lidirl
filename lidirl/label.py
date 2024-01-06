@@ -30,10 +30,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 import json
+import time
 
-from . import __version__
+from lidirl import __version__
 from .utils import get_model_path, list_models, MODELS
-from .models import CLD3Model, RoformerModel, TransformerModel, ConvModel, FlashModel
+from .models import CLD3Model, RoformerModel, TransformerModel, Hierarchical
 from .dataloader import VisRepProcessor
 # from .preprocessor import Processor, NGramProcessor, TrainingShard, VisRepProcessor
 
@@ -93,10 +94,23 @@ def load_from_checkpoint(checkpoint_path : str):
                     dropout=model_dict["dropout"],
                     montecarlo_layer=model_dict['montecarlo_layer']
         )
-        if model_dict['visual']:
-            processor = VisRepProcessor(labels=labels) 
+        if model_dict['input_type'] == "visual":
+            processor = VisRepProcessor() 
         else:
-            processor = Processor(vocab=model_dict['vocab'], labels=model_dict['labels'])
+            processor = None
+    elif model_dict["model_type"] == "hierarchical":
+        model = Hierarchical(
+                    vocab_size=len(model_dict['vocab']),
+                    label_size=model_dict["label_size"],
+                    window_size=model_dict["window_size"],
+                    stride=model_dict["stride"],
+                    embed_dim=model_dict["embed_dim"],
+                    hidden_dim=model_dict["hidden_dim"],
+                    nhead=model_dict["nhead"],
+                    max_length=model_dict["max_length"],
+                    num_layers=model_dict["num_layers"],
+                    montecarlo_layer=model_dict["montecarlo_layer"]
+                    )
     model.load_state_dict(model_dict['weights'])
     model.eval()
     vocab = model_dict["vocab"]
@@ -139,12 +153,14 @@ class EvalModel():
         # treats input file the same as a training data shard with processing/batching
         batches = self.batches(input_file, batch_size = self.args.batch_size)
 
+        pred_time = 0
         for inputs in batches:
             # labels are actually just unks but to follow pipeline we keep them
             # labels = torch.tensor(labels, dtype=torch.long)
 
             inputs = inputs.to(device)
             # see what it says
+
             output = self.model(inputs)
 
             if self.pred_type == "multilabel":
@@ -188,9 +204,9 @@ class EvalModel():
             if len(line) == 0:
                 line = " "
             if self.input_type == "bytes":
-                batch.append(torch.tensor([_ for _ in line.encode('utf-8')]))
+                batch.append(torch.tensor([int(_) for _ in line.encode('utf-8')]))
             elif self.input_type == "characters":
-                batch.append(torch.tensor([_ for _ in line]))
+                batch.append(torch.tensor([self.vocab.get(_, self.vocab["[UNK]"]) for _ in line]))
             else:
                 batch.append(torch.tensor([self.vocab.get(_, self.processor.build_image(_)) for _ in line]))
             if len(batch) == batch_size:
@@ -267,7 +283,8 @@ def label_langs(args):
     
 
     # label file
-    model.label_file(input_file, output_file, device)
+    with torch.no_grad():
+        model.label_file(input_file, output_file, device)
 
 
 def main():

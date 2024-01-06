@@ -40,6 +40,16 @@ from .MCLayer import MCSoftmaxDenseFA
 
 ######################################## CLD3 ########################################
 
+def torch_max_no_pads(model_out, mask, flip=False):
+    input_mask_expanded = mask.unsqueeze(-1).expand(model_out.size()).float()
+    if flip:
+        model_out[input_mask_expanded == 0] = -1e9
+    else:
+        model_out[input_mask_expanded != 0] = -1e9  # Set padding tokens to large negative value
+    model_out = torch.max(model_out, 1)[0]
+    return model_out
+
+######################################## CLD3 ########################################
 
 class CLD3Model(nn.Module):
     """
@@ -118,7 +128,7 @@ class RoformerModel(nn.Module):
                     nhead : int = 8,
                     dropout : float = 0.1,
                     montecarlo_layer : bool = False,
-                    token_level : bool = False
+                    pred_type : str = 'multiclass',
                     ):
         super(RoformerModel, self).__init__()
         self.config = RoFormerConfig(
@@ -145,7 +155,7 @@ class RoformerModel(nn.Module):
         self.max_position_embeddings = max_len
         self.label_size = label_size
         self.montecarlo_layer = montecarlo_layer
-        self.token_level = token_level
+        self.pred_type = pred_type
 
         # print(self.config)
         self.model = RoFormerModel(self.config)
@@ -158,20 +168,10 @@ class RoformerModel(nn.Module):
     def forward(self, inputs):
         inputs = inputs[:, :self.max_position_embeddings]
         mask = (inputs!=0).clone().detach()
-        # mask = torch.tensor(inputs!=0, dtype=torch.float)
         model_out = self.model(inputs, attention_mask=mask).last_hidden_state
-        # encoding = torch.mean(self.model(inputs, attention_mask=mask).last_hidden_state, dim=1)
-        # print(self.token_level)
-        # print(model_out.shape)
-        if not self.token_level:
-            input_mask_expanded = mask.unsqueeze(-1).expand(model_out.size()).float()
-            model_out[input_mask_expanded == 0] = -1e9  # Set padding tokens to large negative value
-            model_out = torch.max(model_out, 1)[0]
-        # print(model_out.shape)
+        if self.pred_type != "token_level":
+            model_out = torch_max_no_pads(model_out, mask, flip=True)
         output = self.proj(model_out)
-        # print(output.shape)
-        # exit()
-        # return F.log_softmax(output, dim=-1)
         return output
 
     def save_object(self):
@@ -186,7 +186,7 @@ class RoformerModel(nn.Module):
             "max_len": self.max_position_embeddings,
             "label_size": self.label_size,
             "montecarlo_layer": self.montecarlo_layer,
-            "token_level": self.token_level
+            "pred_type": self.pred_type
         }
         return save
 
@@ -240,13 +240,13 @@ class TransformerModel(nn.Module):
                     num_layers : int,
                     max_len : int,
                     nhead : int = 8,
-                    roformer : bool = True,
+                    pred_type : str = "multiclass",
                     montecarlo_layer : bool = False,
                     visual_inputs : bool = False,
                     convolutions : list = [1, 16, 32, 64]
                     ):
         super(TransformerModel, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        encoder_layer = nn.TransformerEncoderLayer(embedding_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.convolutions = convolutions
         if visual_inputs:
@@ -268,29 +268,30 @@ class TransformerModel(nn.Module):
         self.num_layers = num_layers
         self.max_length = max_len
         self.nhead = nhead
+        self.pred_type = pred_type
 
     def forward(self, inputs): # need to do padding mask
         if not self.visual_inputs:
             inputs = inputs[:, :self.max_length]
-            pad_mask = self.get_padding_mask(inputs)
-            inputs = inputs.t()
+            mask = (inputs==0).clone().detach()
+            mask = mask[:, :self.max_length]
             embed = self.embed(inputs)
         else:
             # batch size x length x 1 x height x width
             inputs = inputs[:, :self.max_length, :, :, :]
-            pad_mask = None
+            mask = (inputs==0).clone().detach()
+            mask = mask[:, :self.max_length, :, :, :]
+            mask = torch.all(torch.all(mask, dim=-1), dim=-1).squeeze()
             batch_size, seq_length, _, height, width = inputs.shape
             inputs = inputs.reshape(-1, 1, height, width)
             embed = self.embed(inputs).reshape(batch_size, seq_length, -1)
-            embed = embed.transpose(0, 1)
 
         pos_embed = self.pos_embed(embed)
-        encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
-        output = self.proj(encoding)
+        model_output = self.encoder(pos_embed, src_key_padding_mask=mask)
+        if self.pred_type != "token_level":
+            model_output = torch_max_no_pads(model_output, mask)
+        output = self.proj(model_output)
         return output
-
-    def get_padding_mask(self, inputs):
-        return torch.eq(inputs, 0)
 
     def save_object(self):
         save = {
@@ -303,7 +304,8 @@ class TransformerModel(nn.Module):
             "max_length": self.max_length,
             "nhead": self.nhead,
             "montecarlo_layer": self.montecarlo_layer,
-            "convolutions": self.convolutions
+            "convolutions": self.convolutions,
+            "pred_type": self.pred_type
         }
         return save
 
@@ -320,11 +322,11 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, embed_size, 2).float() * (-math.log(10000.0) / embed_size))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0,1)
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
         
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
 ################################### CONVOLUTIONAL #####################################
@@ -400,7 +402,8 @@ class Hierarchical(nn.Module):
                     nhead=8,
                     max_length=512,
                     num_layers=3,
-                    montecarlo_layer = False
+                    montecarlo_layer = False,
+                    pred_type = "multiclass"
                     ):
         super().__init__()
 
@@ -408,14 +411,14 @@ class Hierarchical(nn.Module):
         self.pos_embed = PositionalEncoding(embed_size=embed_dim, max_len=max_length)
 
         # Local transformer for attending over windows
-        window_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim)
-        self.window_encoder = nn.TransformerEncoder(window_layer, num_layers=num_layers)
+        window_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True)
+        self.window_encoder = nn.TransformerEncoder(window_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.window_size = window_size
         self.stride = stride # as of now stride is not implemented
 
         # global transformer for combining outputs of the local transformer
-        encoder_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        encoder_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True)
+        self.global_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
 
         # noise-aware labels layer or traditional linear projection
         if montecarlo_layer:
@@ -423,12 +426,145 @@ class Hierarchical(nn.Module):
         else:
             self.proj = nn.Linear(embed_dim, label_size)
 
+        self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
         self.nhead = nhead
         self.max_length = max_length
         self.label_size = label_size
         self.montecarlo_layer = montecarlo_layer
+        self.num_layers = num_layers
+        self.pred_type = pred_type
+
+    def forward(self, inputs):
+
+        # truncate inputs if too long
+        inputs = inputs[:, :self.max_length]
+
+        if (inputs.shape[1] % self.window_size) != 0:
+            # determine how much padding is necessary to make all windows the same length
+            pad_size = self.window_size - (inputs.shape[1] % self.window_size)
+            pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+
+            # add padding to the input
+            inputs = torch.cat((inputs, pads), dim=1)
+
+        mask = (inputs==0).clone().detach()
+
+        # create windows
+        inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
+        mask = mask.reshape(inputs.shape[0], -1, self.window_size)
+
+        batch_size, seq_len, window_size = inputs.shape
+
+        strides = inputs.reshape(-1, self.window_size) # collapse sequence length and batch size into one dimension for parallelization
+        window_mask = mask.reshape(-1, self.window_size).clone().detach()
+        window_mask[torch.all(window_mask, dim=-1)] = False
+        embeds = self.embed_layer(strides) # embed inputs
+        pos_embed = self.pos_embed(embeds) # sino pos embed
+        window_encoding = torch_max_no_pads(self.window_encoder(pos_embed, src_key_padding_mask=window_mask), window_mask) # take mean across window sequence
+        windows = window_encoding.reshape(batch_size, seq_len, -1) # re-insert the original sequence length dimension
+        mask = torch.all(mask, dim=-1)
+
+        pos_embed = self.pos_embed(windows) # add positional again
+        encoding = torch_max_no_pads(self.global_encoder(pos_embed, src_key_padding_mask=mask), mask) # take mean across global sequence
+        output = self.proj(encoding) # project onto labels (raw logits)
+        return output
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embed_dim": self.embed_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size,
+            "window_size": self.window_size,
+            "stride": self.stride,
+            "montecarlo_layer": self.montecarlo_layer,
+            "nhead": self.nhead,
+            "max_length": self.max_length,
+            "num_layers": self.num_layers,
+            "pred_type" : self.pred_type
+        }
+        return save  
+
+######################################################################################
+
+class HierarchicalRoformer(nn.Module):
+    def __init__(self, 
+                    vocab_size : int,
+                    label_size : int,
+                    window_size=32,
+                    stride=32,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    nhead=8,
+                    max_length=512,
+                    num_layers=3,
+                    montecarlo_layer = False,
+                    pred_type = "multiclass"
+                    ):
+        super().__init__()
+
+        dropout = 0.1
+
+        self.embed_layer = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = PositionalEncoding(embed_size=embed_dim, max_len=max_length)
+        self.global_pos_embed = PositionalEncoding(embed_size=hidden_dim, max_len=max_length)
+
+        self.local_config = RoFormerConfig(
+            vocab_size = vocab_size,
+            embedding_size = embed_dim,
+            hidden_size = hidden_dim,
+            num_hidden_layers = num_layers,
+            num_attention_heads = nhead,
+            intermediate_size = hidden_dim,
+            hidden_dropout_prob = dropout,
+            attention_probs_dropout_prob = dropout,
+            max_position_embeddings = max_length,
+            type_vocab_size = 2,
+            rotary_value = False,
+        )
+
+        self.global_config = RoFormerConfig(
+            vocab_size = vocab_size,
+            embedding_size = hidden_dim,
+            hidden_size = hidden_dim,
+            num_hidden_layers = num_layers,
+            num_attention_heads = nhead,
+            intermediate_size = hidden_dim,
+            hidden_dropout_prob = dropout,
+            attention_probs_dropout_prob = dropout,
+            max_position_embeddings = max_length,
+            type_vocab_size = 2,
+            rotary_value = False,
+        )
+
+
+
+        # Local transformer for attending over windows
+        self.window_encoder = RoFormerModel(self.local_config)
+        self.window_size = window_size
+        self.stride = stride # as of now stride is not implemented
+
+        # global transformer for combining outputs of the local transformer
+        self.global_encoder = RoFormerModel(self.global_config)
+
+        # noise-aware labels layer or traditional linear projection
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(hidden_dim, label_size)
+
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.max_length = math.floor(max_length // window_size)
+        self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
+        self.num_layers = num_layers
+        self.pred_type = pred_type
 
     def get_padding_mask(self, inputs):
         mask = torch.sum(inputs,dim=-1) == 0
@@ -439,34 +575,41 @@ class Hierarchical(nn.Module):
         # truncate inputs if too long
         inputs = inputs[:, :self.max_length]
 
-        # determine how much padding is necessary to make all windows the same length
-        pad_size = self.window_size - (inputs.shape[1] % self.window_size)
-        pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+        if (inputs.shape[1] % self.window_size) != 0:
+            # determine how much padding is necessary to make all windows the same length
+            pad_size = self.window_size - (inputs.shape[1] % self.window_size)
+            pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
 
-        # add padding to the input
-        inputs = torch.cat((inputs, pads), dim=1)
+            # add padding to the input
+            inputs = torch.cat((inputs, pads), dim=1)
 
-        # collapse the window sequence length and batch dimensions for parallelization
-        inputs = inputs.view(inputs.shape[0], -1, self.window_size)
+        mask = (inputs!=0).clone().detach()
+        mask = (inputs == inputs)
+
+        # create windows
+        inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
+        mask = mask.reshape(inputs.shape[0], -1, self.window_size)
 
         batch_size, seq_len, window_size = inputs.shape
 
-        strides = inputs.reshape(-1, self.window_size).transpose(0, 1)
-        embeds = self.embed_layer(strides)
-        pos_embed = self.pos_embed(embeds)
-        window_encoding = torch.mean(self.window_encoder(pos_embed), dim=0)
-        windows = window_encoding.view(batch_size, seq_len, -1).transpose(0,1)
+        strides = inputs.reshape(-1, self.window_size) # collapse sequence length and batch size into one dimension for parallelization
+        window_mask = mask.reshape(-1, self.window_size).clone().detach()
+        window_mask[~torch.any(window_mask, dim=-1)] = True        
+        embeds = self.embed_layer(strides) # embed inputs
+        embeds = self.pos_embed(embeds)
+        window_encoding = torch_max_no_pads(self.window_encoder(inputs_embeds=embeds, encoder_attention_mask=window_mask).last_hidden_state, window_mask, flip=True) # take mean across window sequence
+        windows = window_encoding.reshape(batch_size, seq_len, -1) # re-insert the original sequence length dimension
+        mask = torch.any(mask, dim=-1)
 
-
-        pos_embed = self.pos_embed(windows)
-        pad_mask = self.get_padding_mask(inputs)
-        encoding = torch.mean(self.encoder(pos_embed, src_key_padding_mask=pad_mask), dim=0)
-        output = self.proj(encoding)
+        windows = self.global_pos_embed(windows)
+        encoding = torch_max_no_pads(self.global_encoder(inputs_embeds=windows, encoder_attention_mask=mask).last_hidden_state, mask, flip=True) # take mean across global sequence
+        output = self.proj(encoding) # project onto labels (raw logits)
         return output
 
     def save_object(self):
         save = {
             "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
             "embed_dim": self.embed_dim,
             "hidden_dim": self.hidden_dim,
             "label_size": self.label_size,
@@ -474,11 +617,11 @@ class Hierarchical(nn.Module):
             "stride": self.stride,
             "montecarlo_layer": self.montecarlo_layer,
             "nhead": self.nhead,
-            "max_length": self.max_length
+            "max_length": self.max_length,
+            "num_layers": self.num_layers,
+            "pred_type": self.pred_type
         }
         return save  
-
-
 
 ####################################### UNET ##########################################
 

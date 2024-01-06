@@ -225,8 +225,8 @@ class Dataset(torch.utils.data.IterableDataset):
 
         # We only keep the highest frequency characters in our vocabulary
         # add UNK
+        vocab["[PAD]"] = 0
         if self.input_type == "characters":
-            vocab["[PAD]"] = 0
             vocab["[UNK]"] = 1
             logger.info(f"Total vocab size for character model is {int(vocab_length)}")
             for v, _ in vocab_counter[:int(vocab_length)]:
@@ -234,14 +234,12 @@ class Dataset(torch.utils.data.IterableDataset):
             
         # Bytes obviously ignores and uses the byte number as the index
         elif self.input_type == "bytes":
-            vocab["[PAD]"] = 0
             logger.info("Using byte level model. Vocab size 256.")
             for _ in range(256):
                 vocab[str(_)] = _
 
         # for visual representations we will cache the most frequent characters
         else:
-            vocab["[PAD]"] = 1
             logger.info(f"Visual representation inputs. Will precache {int(vocab_length)} most frequent characters.")
             for v, _ in vocab_counter[:int(vocab_length)]:
                 vocab[v] = self.visual_processor.build_image(v)

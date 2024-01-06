@@ -21,7 +21,7 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
 
 from . import __version__
 from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
-from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical
+from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical, HierarchicalRoformer
 
 from .metrics import Results
 from .logger import TrainingLogger
@@ -165,6 +165,7 @@ class Trainer():
                     
                 else:
                     loss = self.criterion(output, labels)
+
                     ppl = torch.exp(F.cross_entropy(output, targets)/args.update_interval).item()
 
                 # keep track of metrics for eventually logging
@@ -208,7 +209,7 @@ class Trainer():
                                             args.input_type,
                                             args.pred_type,
                                             self.train_dataset, 
-                                            os.path.join(self.output_path, 'checkpoint_best.pt'), 
+                                            os.path.join(self.output_path, 'checkpoint_best_accuracy.pt'), 
                                             training_status=training_status,
                                             scheduler=self.scheduler,
                                             optimizer=self.optimizer,
@@ -224,7 +225,7 @@ class Trainer():
                                             args.input_type,
                                             args.pred_type,
                                             self.train_dataset, 
-                                            os.path.join(self.output_path, 'checkpoint_best.pt'),
+                                            os.path.join(self.output_path, 'checkpoint_best_loss.pt'),
                                             training_status=training_status,
                                             scheduler=self.scheduler,
                                             optimizer=self.optimizer,
@@ -246,7 +247,7 @@ class Trainer():
                                         args.input_type,
                                         args.pred_type,
                                         self.train_dataset, 
-                                        os.path.join(self.output_path, 'checkpoint_best.pt'), 
+                                        os.path.join(self.output_path, 'checkpoint_best_accuracy.pt'), 
                                         training_status=training_status,
                                         scheduler=self.scheduler,
                                         optimizer=self.optimizer,
@@ -326,12 +327,12 @@ class Trainer():
                                 loss += F.cross_entropy(o, t, reduce=False).item()
                                 ppl += torch.exp(F.cross_entropy(o, t)).item()
                     else:
-                        loss = F.cross_entropy(output, targets, reduction='sum').item()
-                        ppl = math.exp(loss)
+                        loss = F.cross_entropy(output, targets, reduction='sum')
+                        ppl = torch.exp(F.cross_entropy(output, targets, reduction='sum')).item()
 
                     probs = F.softmax(output, dim=1)
 
-                    valid_results.calculate(loss, ppl, probs, targets, args.pred_type == "token_level")
+                    valid_results.calculate(loss.item(), ppl, probs, targets, args.pred_type == "token_level")
             ret_results[name] = {}
             for key, value in valid_results.get_results(self.optimizer.param_groups[0]['lr']).items():
                 if key in ["accuracy", "total_loss", "ppl_per_pred", "num_pred"]:
@@ -377,6 +378,7 @@ def build_model(args, vocab, labels):
                                     nhead=args.nhead,
                                     montecarlo_layer=args.montecarlo_layer,
                                     visual_inputs=visual,
+                                    pred_type=args.pred_type,
                                     convolutions=[1] + [int(_) for _ in args.convolutions.split(',')])
     elif args.model == "roformer":
         model = RoformerModel(vocab_size=len(vocab),
@@ -388,7 +390,7 @@ def build_model(args, vocab, labels):
                                     nhead=args.nhead,
                                     dropout=args.dropout,
                                     montecarlo_layer=args.montecarlo_layer,
-                                    token_level=token_level)
+                                    pred_type=args.pred_type)
     elif args.model == "convolutional":
         model = ConvModel(vocab_size=len(vocab),
                             label_size=len(labels),
@@ -415,6 +417,20 @@ def build_model(args, vocab, labels):
                     nhead=args.nhead,
                     max_length=args.max_length,
                     num_layers=args.num_layers,
+                    pred_type=args.pred_type,
+        )
+    elif args.model == "hierarchical-roformer":
+        model = HierarchicalRoformer(
+                    vocab_size=len(vocab),
+                    label_size=len(labels),
+                    window_size=args.window_size,
+                    stride=args.stride,
+                    embed_dim=args.embedding_dim,
+                    hidden_dim=args.hidden_dim,
+                    nhead=args.nhead,
+                    max_length=args.max_length,
+                    num_layers=args.num_layers,
+                    pred_type=args.pred_type,
         )
 
     return model
@@ -602,6 +618,12 @@ def parse_args():
     unet_parser.add_argument("--pad_length", default=1024, type=int)
 
     hierachical_parser = subparsers.add_parser("hierarchical", help="a hierarchical model")
+    hierachical_parser.add_argument("--max-length", default=1024, type=int)
+    hierachical_parser.add_argument("--nhead", default=8, type=int)
+    hierachical_parser.add_argument("--window-size", default=8, type=int)
+    hierachical_parser.add_argument("--stride", default=1, type=int)
+
+    hierachical_parser = subparsers.add_parser("hierarchical-roformer", help="a hierarchical model")
     hierachical_parser.add_argument("--max-length", default=1024, type=int)
     hierachical_parser.add_argument("--nhead", default=8, type=int)
     hierachical_parser.add_argument("--window-size", default=8, type=int)
