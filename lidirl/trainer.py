@@ -22,6 +22,7 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
 from . import __version__
 from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
 from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical, HierarchicalRoformer
+from .lr_scheduler import NoamOpt
 
 from .metrics import Results
 from .logger import TrainingLogger
@@ -92,16 +93,13 @@ class Trainer():
             self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1, reduction='sum')
             
         self.lr = args.lr
-        # self.warmup_lr = args.warmup_lr
-        # self.warmup_updates = args.warmup_updates
+        self.warmup_lr = args.warmup_lr
+        self.warmup_updates = args.warmup_updates
 
-        # lr = self.warmup_lr if (args.warmup_lr is not None and args.warmup_updates is not None) else self.lr
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, betas=(0.9, 0.98), eps=1e-9)
         self.optimizer.zero_grad()
 
-        # if self.args.warmup_lr is not None and self.args.warmup_updates is not None:
-        #     scheduler = LinearLR(self.optimizer, total_iters=args.warmup_updates)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 500, gamma=0.99)
+        self.scheduler = NoamOpt(self.lr, self.warmup_updates, self.warmup_lr, self.optimizer)
 
         total_params = sum([p.numel() for p in self.model.parameters()])
         logger.info(f'Training with: {total_params} total parameters')

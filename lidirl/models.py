@@ -584,7 +584,7 @@ class HierarchicalRoformer(nn.Module):
             inputs = torch.cat((inputs, pads), dim=1)
 
         mask = (inputs!=0).clone().detach()
-        mask = (inputs == inputs)
+        # mask = (inputs == inputs)
 
         # create windows
         inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
@@ -596,12 +596,12 @@ class HierarchicalRoformer(nn.Module):
         window_mask = mask.reshape(-1, self.window_size).clone().detach()
         window_mask[~torch.any(window_mask, dim=-1)] = True        
         embeds = self.embed_layer(strides) # embed inputs
-        embeds = self.pos_embed(embeds)
+        # embeds = self.pos_embed(embeds)
         window_encoding = torch_max_no_pads(self.window_encoder(inputs_embeds=embeds, encoder_attention_mask=window_mask).last_hidden_state, window_mask, flip=True) # take mean across window sequence
         windows = window_encoding.reshape(batch_size, seq_len, -1) # re-insert the original sequence length dimension
         mask = torch.any(mask, dim=-1)
 
-        windows = self.global_pos_embed(windows)
+        # windows = self.global_pos_embed(windows)
         encoding = torch_max_no_pads(self.global_encoder(inputs_embeds=windows, encoder_attention_mask=mask).last_hidden_state, mask, flip=True) # take mean across global sequence
         output = self.proj(encoding) # project onto labels (raw logits)
         return output
