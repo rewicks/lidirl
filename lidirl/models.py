@@ -165,9 +165,10 @@ class RoformerModel(nn.Module):
             self.proj = nn.Linear(hidden_dim, label_size)
 
 
-    def forward(self, inputs):
+    def forward(self, inputs, mask=None):
         inputs = inputs[:, :self.max_position_embeddings]
-        mask = (inputs!=0).clone().detach()
+        # mask = (inputs!=0).clone().detach()
+        mask = ~mask
         model_out = self.model(inputs, attention_mask=mask).last_hidden_state
         if self.pred_type != "token_level":
             model_out = torch_max_no_pads(model_out, mask, flip=True)
@@ -436,20 +437,24 @@ class Hierarchical(nn.Module):
         self.num_layers = num_layers
         self.pred_type = pred_type
 
-    def forward(self, inputs):
+    def forward(self, inputs, mask=None):
 
         # truncate inputs if too long
         inputs = inputs[:, :self.max_length]
+        mask = mask[:, :self.max_length]
 
         if (inputs.shape[1] % self.window_size) != 0:
             # determine how much padding is necessary to make all windows the same length
             pad_size = self.window_size - (inputs.shape[1] % self.window_size)
             pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+            mask_pads = torch.ones((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.bool)
+
 
             # add padding to the input
             inputs = torch.cat((inputs, pads), dim=1)
+            mask = torch.cat((mask, mask_pads), dim=1)
 
-        mask = (inputs==0).clone().detach()
+        # mask = (inputs==0).clone().detach()
 
         # create windows
         inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
@@ -570,10 +575,11 @@ class HierarchicalRoformer(nn.Module):
         mask = torch.sum(inputs,dim=-1) == 0
         return mask
 
-    def forward(self, inputs):
+    def forward(self, inputs, mask=None):
 
         # truncate inputs if too long
         inputs = inputs[:, :self.max_length]
+        mask = mask[:, :self.max_length]
 
         if (inputs.shape[1] % self.window_size) != 0:
             # determine how much padding is necessary to make all windows the same length
@@ -583,7 +589,8 @@ class HierarchicalRoformer(nn.Module):
             # add padding to the input
             inputs = torch.cat((inputs, pads), dim=1)
 
-        mask = (inputs!=0).clone().detach()
+        mask = ~mask
+        # mask = (inputs!=0).clone().detach()
         # mask = (inputs == inputs)
 
         # create windows
@@ -698,7 +705,7 @@ class UNETModel(nn.Module):
         self.proj = nn.Linear(self.chs[1], label_size)
 
     
-    def forward(self, inputs):
+    def forward(self, inputs, mask=None):
         inputs = inputs[:, :self.length]
         emb = self.embed(inputs).transpose(1,2)
         encoding = self.encoder(emb)
@@ -1052,3 +1059,65 @@ class FlashModel(nn.Module):
         return save
 
 
+############################## MAMBA #############################
+
+
+
+class Mamba(nn.Module):
+    def __init__(self, 
+                    vocab_size : int,
+                    label_size : int,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    max_length=512, # I'm not sure if you need this?
+                    num_layers=3,
+                    montecarlo_layer = False,
+                    pred_type = "multiclass"
+                    ):
+        super().__init__()
+
+
+        """ I don't know if you need this, but if you just use self.proj in forward for projection then it'll be compatible with the noise-aware training"""
+        # noise-aware labels layer or traditional linear projection
+        if montecarlo_layer:
+            self.proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.proj = nn.Linear(embed_dim, label_size)
+
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.max_length = max_length
+        self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
+        self.num_layers = num_layers
+        self.pred_type = pred_type
+
+    def forward(self, inputs, mask=None):
+
+        # inputs are batch size x sequence length
+        # mask is the same. True where padded.
+
+        # REPLACE THIS:
+        encoding = torch.randn((inputs.shape[0], self.hidden_dim), device=inputs.device)
+
+        # I think this should be the same
+        output = self.proj(encoding) # project onto labels (raw logits)
+        return output # output should be raw logits as softmax or sigmoid is applied separately (dependent on pred_type)
+
+    def save_object(self):
+        """
+        If you add any hyperparameters, could you also save them here.
+        """
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embed_dim": self.embed_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size,
+            "montecarlo_layer": self.montecarlo_layer,
+            "max_length": self.max_length,
+            "num_layers": self.num_layers,
+            "pred_type" : self.pred_type
+        }
+        return save  

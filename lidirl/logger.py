@@ -57,6 +57,7 @@ class TrainingLogger():
                 logger.info("wandb not installed. If you would like to log your training with this tool please `pip install wandb`")
                 self.use_wandb = False
         else:
+            logger.info("No wandb project passed. Not logging online.")
             self.use_wandb = False
 
     def log(self, out_json):

@@ -21,7 +21,7 @@ if (__package__ is None or __package__ == "") and __name__ == '__main__':
 
 from . import __version__
 from .preprocessor import Dataset, Processor, PaddedProcessor, NGramProcessor, VisRepProcessor
-from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical, HierarchicalRoformer
+from .models import CLD3Model, TransformerModel, ConvModel, UNETModel, RoformerModel, Hierarchical, HierarchicalRoformer, Mamba
 from .lr_scheduler import NoamOpt
 
 from .metrics import Results
@@ -84,6 +84,7 @@ class Trainer():
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
 
+
         self.model = model.to(self.device)
         logger.info(self.model)
 
@@ -118,10 +119,13 @@ class Trainer():
         self.iswarm = False
         logger.info(args)
 
-        wandb_config = {
-            "project_name": args.wandb_proj,
-            "run_name": args.wandb_run
-        }
+        if args.wandb_proj is not None:
+            wandb_config = {
+                "project_name": args.wandb_proj,
+                "run_name": args.wandb_run
+            }
+        else:
+            wandb_config = None
 
         self.train_log = TrainingLogger(stdout=True,
                                             wandb_config=wandb_config)
@@ -129,22 +133,23 @@ class Trainer():
         self.num_updates = 0
 
     def run_epoch(self, args, epoch=0):
-        for batch_index, (texts, targets) in enumerate(self.train_dataset, 1):
+        for batch_index, (texts, targets, masks) in enumerate(self.train_dataset, 1):
             try:
-                # multilabel means that every target class with greater than 0 prob should be correct label
-                if args.pred_type == "multilabel":
-                    for trg in targets:
-                        targets[trg > 0] = 1
-
                 inputs = texts.to(self.device)
                 targets = targets.to(self.device)
+                masks = masks.to(self.device)
 
-                output = self.model(inputs) # raw logits
-                
+                # if torch.any(torch.isinf(self.model.embed_layer.weight)).item() or torch.any(torch.isnan(self.model.embed_layer.weight)).item():
+                #     breakpoint()
+
+                output = self.model(inputs, mask=masks) # raw logits
+            
+                # multilabel means that every target class with greater than 0 prob should be correct label
                 # multiabel--there should be some threshold logic here, but alas
                 # by default, we'll just use sigmoid (0.5 threshold)
                 if args.pred_type == "multilabel":
                     output = F.sigmoid(output)
+                    targets[targets > 0] = 1
                     labels = targets
 
                 # traditional, multiclass classifier
@@ -164,7 +169,10 @@ class Trainer():
                 else:
                     loss = self.criterion(output, labels)
 
-                    ppl = torch.exp(F.cross_entropy(output, targets)/args.update_interval).item()
+                    try:
+                        ppl = torch.exp(F.cross_entropy(output, targets)/args.update_interval).item()
+                    except:
+                        breakpoint()
 
                 # keep track of metrics for eventually logging
                 self.results.calculate(loss.item()/args.update_interval, ppl, output, targets, args.pred_type == "token_level")
@@ -189,6 +197,8 @@ class Trainer():
                     if self.num_updates == args.max_updates:
                         logger.info(f"Reached maximum number of updates ({args.max_updates}) for training. Stopping.")
                         return 0
+                    # if torch.any(torch.isinf(self.model.embed_layer.weight)).item() or torch.any(torch.isnan(self.model.embed_layer.weight)).item():
+                    #     breakpoint()
 
                 if (batch_index) % (args.log_interval * args.update_interval) == 0:
                     batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=batch_index+1)
@@ -306,15 +316,17 @@ class Trainer():
                                         device=self.device,
                                         type='VALIDATION')
             with torch.no_grad():
-                for batch_index, (texts, targets) in enumerate(val, 1):
+                for batch_index, (texts, targets, masks) in enumerate(val, 1):
                     inputs = texts.to(self.device)
                     targets = targets.to(self.device)
-                    output = self.model(inputs)
+                    masks = masks.to(self.device)
 
-                    if args.pred_type != "multilabel":
-                        labels = torch.argmax(targets, dim=1)
-                    else:
-                        labels = targets
+                    output = self.model(inputs, mask=masks)
+
+                    # if args.pred_type != "multilabel":
+                    #     labels = torch.argmax(targets, dim=1)
+                    if args.pred_type == "multilabel":
+                        targets[targets > 0] = 1
                         output = F.sigmoid(output)
 
                     if args.model == "unet" or args.pred_type == "token_level":
@@ -430,6 +442,17 @@ def build_model(args, vocab, labels):
                     num_layers=args.num_layers,
                     pred_type=args.pred_type,
         )
+    elif args.model == "mamba":
+        model = Mamba(
+            vocab_size=len(vocab),
+            label_size=len(labels),
+            embed_dim=args.embedding_dim,
+            hidden_dim=args.hidden_dim,
+            max_length=args.max_length,
+            num_layers=args.num_layers,
+            pred_type=args.pred_type,
+            montecarlo_layer=args.montecarlo_layer
+        )
 
     return model
 
@@ -449,6 +472,15 @@ def parse_args():
                                         help="The path to the validation data.")
     parser.add_argument('--smart_group_validation_files', default=False, action="store_true",
                             help="If passed, will group validation sets into separately logged clusters based on each file's parent directory")
+
+    parser.add_argument("--vocab_length",
+                                        type=int,
+                                        default=None,
+                                        help="How large to limit the vocab size")
+    parser.add_argument("--character_coverage",
+                                        type=float,
+                                        default=1.0,
+                                        help="What percent (0,1] of the characters/bytes to cover")
 
     parser.add_argument("--output_path", 
                                         required=True,
@@ -626,6 +658,10 @@ def parse_args():
     hierachical_parser.add_argument("--nhead", default=8, type=int)
     hierachical_parser.add_argument("--window-size", default=8, type=int)
     hierachical_parser.add_argument("--stride", default=1, type=int)
+
+
+    mamba_parser = subparsers.add_parser("mamba", help="a mamba model")
+    mamba_parser.add_argument("--max-length", default=1024, type=int)
 
     args = parser.parse_args()
 

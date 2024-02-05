@@ -91,13 +91,6 @@ class VisRepProcessor():
 ####################################### DATASET ######################################
 
 
-# def file_gen(file_name):
-#     while True:
-#         with open(file_name) as inf:
-#             for index, line in enumerate(inf):
-#                 if len(line.strip().split('\t')) == 2:
-#                     yield line, index
-
 class Dataset(torch.utils.data.IterableDataset):
     def __init__(self,
                     train_files,
@@ -109,7 +102,9 @@ class Dataset(torch.utils.data.IterableDataset):
                     visual_processor = None,
                     num_workers = 1,
                     augmentations = None,
-                    augmentation_prob = 0.0):
+                    augmentation_prob = 0.0,
+                    vocab_length = None,
+                    character_coverage = 1.0):
         super(Dataset).__init__()
 
         logger.info(f"Creating a {type} dataset with {input_type} inputs.")
@@ -127,7 +122,7 @@ class Dataset(torch.utils.data.IterableDataset):
         # both vocab and labels should either be passed or be None
         if vocab is None:
             logger.info("Vocab was not passed. Builing vocabulary and label index.")
-            self.vocab, self.labels = self.build_vocab_and_labels(train_files)
+            self.vocab, self.labels = self.build_vocab_and_labels(train_files, vocab_length=vocab_length, character_coverage = character_coverage)
         else:
             logger.info("Using predefined vocabulary and label index.")
             self.vocab = vocab
@@ -203,6 +198,8 @@ class Dataset(torch.utils.data.IterableDataset):
         vocab = {}
         labels = {}
 
+        vocab["[PAD]"] = 0
+
         vocab_counter = Counter()
         for t in train_files:
             with open(t) as inf:
@@ -211,7 +208,8 @@ class Dataset(torch.utils.data.IterableDataset):
                     if len(line) > 1 and len(line[1].strip()) > 0:
                         labels = add_label(labels, line[0])
                         vocab_counter.update([t for t in line[1]])
-                        if self.augmentations is not None and random.random() < self.augmentation_prob:
+                        # marginally faster for byte representations
+                        if self.input_type != 'bytes' and self.augmentations is not None and random.random() < self.augmentation_prob:
                             aug = self.get_augmentation()
                             if type(aug) is not Codeswitch:
                                 new_text = aug(line[1].strip())
@@ -222,27 +220,26 @@ class Dataset(torch.utils.data.IterableDataset):
         if vocab_length is None:
             vocab_length = character_coverage * len(vocab_counter)
 
+        # for visual representations we will cache the most frequent characters
+        if self.input_type == "visual":
+            logger.info(f"Visual representation inputs. Will precache {int(vocab_length)} most frequent characters.")
+            for v, _ in vocab_counter[:int(vocab_length)]:
+                vocab[v] = self.visual_processor.build_image(v)
+
 
         # We only keep the highest frequency characters in our vocabulary
         # add UNK
-        vocab["[PAD]"] = 0
-        if self.input_type == "characters":
+        elif self.input_type == "characters":
             vocab["[UNK]"] = 1
             logger.info(f"Total vocab size for character model is {int(vocab_length)}")
             for v, _ in vocab_counter[:int(vocab_length)]:
                 vocab[v] = len(vocab.keys())
             
         # Bytes obviously ignores and uses the byte number as the index
-        elif self.input_type == "bytes":
+        else:
             logger.info("Using byte level model. Vocab size 256.")
             for _ in range(256):
                 vocab[str(_)] = _
-
-        # for visual representations we will cache the most frequent characters
-        else:
-            logger.info(f"Visual representation inputs. Will precache {int(vocab_length)} most frequent characters.")
-            for v, _ in vocab_counter[:int(vocab_length)]:
-                vocab[v] = self.visual_processor.build_image(v)
 
         return vocab, labels
 
@@ -429,6 +426,12 @@ class BatchCollator():
 
         return labels
    
+    def create_mask(self, texts):
+        lengths = [len(t) for t in texts]
+        mask = torch.zeros((len(lengths), max(lengths)), dtype=torch.bool)
+        for i, l in enumerate(lengths):
+            mask[i][l:] = True
+        return mask
 
     def __call__(self, samples):
         max_size = 0
@@ -440,10 +443,11 @@ class BatchCollator():
             labels.append(label)
             texts.append(text)
 
+        mask = self.create_mask(texts)
         padded_text = self.pad_texts(texts, max_size=max_size)
         processed_labels = self.process_labels(labels)
 
-        return padded_text, processed_labels
+        return padded_text, processed_labels, mask
 
             
 class ValidationDataLoader():
@@ -479,7 +483,9 @@ def build_datasets(args, augmentations):
                                 visual_processor=visproc,
                                 temperature=args.temperature,
                                 augmentations=augmentations,
-                                augmentation_prob=args.augmentation_probability)
+                                augmentation_prob=args.augmentation_probability,
+                                vocab_length = args.vocab_length,
+                                character_coverage = args.character_coverage)
 
     token_level = True if args.pred_type == "token_level" else False
 
