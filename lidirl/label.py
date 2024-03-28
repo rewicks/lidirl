@@ -154,14 +154,15 @@ class EvalModel():
         batches = self.batches(input_file, batch_size = self.args.batch_size)
 
         pred_time = 0
-        for inputs in batches:
+        for inputs, mask in batches:
             # labels are actually just unks but to follow pipeline we keep them
             # labels = torch.tensor(labels, dtype=torch.long)
 
             inputs = inputs.to(device)
+            mask = mask.to(device)
             # see what it says
 
-            output = self.model(inputs)
+            output = self.model(inputs, mask=mask)
 
             if self.pred_type == "multilabel":
                 probs = F.sigmoid(output)
@@ -197,6 +198,13 @@ class EvalModel():
                 outputs.append(output_line.strip())
         return outputs
 
+    def create_mask(self, texts):
+        lengths = [len(t) for t in texts]
+        mask = torch.zeros((len(lengths), max(lengths)), dtype=torch.bool)
+        for i, l in enumerate(lengths):
+            mask[i][l:] = True
+        return mask
+
     def batches(self, input_file, batch_size=25):
         batch = []
         for line in input_file:
@@ -211,11 +219,13 @@ class EvalModel():
                 batch.append(torch.tensor([self.vocab.get(_, self.processor.build_image(_)) for _ in line]))
             if len(batch) == batch_size:
                 padded_texts = pad_sequence(batch, batch_first=True, padding_value=self.vocab["[PAD]"])
-                yield padded_texts
+                masks = self.create_mask(batch)
+                yield padded_texts, masks
                 batch = []
         if len(batch) > 0:
             padded_texts = pad_sequence(batch, batch_first=True, padding_value=self.vocab["[PAD]"])
-            yield padded_texts
+            masks = self.create_mask(batch)
+            yield padded_texts, masks
         
 
 def parse_args():

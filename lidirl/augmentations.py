@@ -38,6 +38,10 @@ import json
 
 
 def build_augmentations(args):
+    """
+        Takes in a '/' separated list of augmentation names and creates objects for each class.
+        TODO: fix so that it is more intuitive way to add augmentations to command line args
+    """
     if args.augmentations is not None:
         augs = []
         probs = []

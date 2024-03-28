@@ -122,7 +122,7 @@ class Dataset(torch.utils.data.IterableDataset):
         # both vocab and labels should either be passed or be None
         if vocab is None:
             logger.info("Vocab was not passed. Builing vocabulary and label index.")
-            self.vocab, self.labels = self.build_vocab_and_labels(train_files, vocab_length=vocab_length, character_coverage = character_coverage)
+            self.vocab, self.labels = self.build_vocab_and_labels(train_files, vocab_length = vocab_length, character_coverage = character_coverage)
         else:
             logger.info("Using predefined vocabulary and label index.")
             self.vocab = vocab
@@ -205,6 +205,8 @@ class Dataset(torch.utils.data.IterableDataset):
             with open(t) as inf:
                 for line in inf:
                     line = line.strip().split('\t')
+
+                    # ensure there is a label and an input text
                     if len(line) > 1 and len(line[1].strip()) > 0:
                         labels = add_label(labels, line[0])
                         vocab_counter.update([t for t in line[1]])

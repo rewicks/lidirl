@@ -139,9 +139,6 @@ class Trainer():
                 targets = targets.to(self.device)
                 masks = masks.to(self.device)
 
-                # if torch.any(torch.isinf(self.model.embed_layer.weight)).item() or torch.any(torch.isnan(self.model.embed_layer.weight)).item():
-                #     breakpoint()
-
                 output = self.model(inputs, mask=masks) # raw logits
             
                 # multilabel means that every target class with greater than 0 prob should be correct label
@@ -197,8 +194,6 @@ class Trainer():
                     if self.num_updates == args.max_updates:
                         logger.info(f"Reached maximum number of updates ({args.max_updates}) for training. Stopping.")
                         return 0
-                    # if torch.any(torch.isinf(self.model.embed_layer.weight)).item() or torch.any(torch.isnan(self.model.embed_layer.weight)).item():
-                    #     breakpoint()
 
                 if (batch_index) % (args.log_interval * args.update_interval) == 0:
                     batch_results = self.results.get_results(self.optimizer.param_groups[0]['lr'], completed=batch_index+1)
@@ -658,6 +653,12 @@ def parse_args():
     hierachical_parser.add_argument("--nhead", default=8, type=int)
     hierachical_parser.add_argument("--window-size", default=8, type=int)
     hierachical_parser.add_argument("--stride", default=1, type=int)
+
+    global_local = subparsers.add_parser("global-local", help="a global-local model")
+    global_local.add_argument("--max-length", default=1024, type=int)
+    global_local.add_argument("--nhead", default=8, type=int)
+    global_local.add_argument("--window-size", default=8, type=int)
+    global_local.add_argument("--stride", default=1, type=int)
 
 
     mamba_parser = subparsers.add_parser("mamba", help="a mamba model")

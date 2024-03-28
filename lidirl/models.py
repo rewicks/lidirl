@@ -167,6 +167,7 @@ class RoformerModel(nn.Module):
 
     def forward(self, inputs, mask=None):
         inputs = inputs[:, :self.max_position_embeddings]
+        mask = mask[:, :self.max_position_embeddings]
         # mask = (inputs!=0).clone().detach()
         mask = ~mask
         model_out = self.model(inputs, attention_mask=mask).last_hidden_state
@@ -492,6 +493,248 @@ class Hierarchical(nn.Module):
             "pred_type" : self.pred_type
         }
         return save  
+    
+
+class GlobalLocal(nn.Module):
+    def __init__(self, 
+                    vocab_size : int,
+                    label_size : int,
+                    window_size=32,
+                    stride=32,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    nhead=8,
+                    max_length=512,
+                    num_layers=3,
+                    montecarlo_layer = False,
+                    pred_type = "multiclass"
+                    ):
+        super().__init__()
+
+        self.embed_layer = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = PositionalEncoding(embed_size=embed_dim, max_len=max_length)
+
+        # Local transformer for attending over windows
+        window_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True)
+        self.window_encoder = nn.TransformerEncoder(window_layer, num_layers=num_layers, enable_nested_tensor=False)
+        self.window_size = window_size
+        self.stride = stride # as of now stride is not implemented
+
+        # global transformer for combining outputs of the local transformer
+        encoder_layer = nn.TransformerEncoderLayer(embed_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True)
+        self.global_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
+
+        # noise-aware labels layer or traditional linear projection
+        if montecarlo_layer:
+            self.global_proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+            self.local_proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.global_proj = nn.Linear(embed_dim, label_size)
+            self.local_proj = nn.Linear(embed_dim, label_size)
+
+
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.max_length = max_length
+        self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
+        self.num_layers = num_layers
+        self.pred_type = pred_type
+
+    def forward(self, inputs, mask=None):
+
+        # truncate inputs if too long
+        inputs = inputs[:, :self.max_length]
+        mask = mask[:, :self.max_length]
+
+        if (inputs.shape[1] % self.window_size) != 0:
+            # determine how much padding is necessary to make all windows the same length
+            pad_size = self.window_size - (inputs.shape[1] % self.window_size)
+            pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+            mask_pads = torch.ones((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.bool)
+
+            # add padding to the input
+            inputs = torch.cat((inputs, pads), dim=1)
+            mask = torch.cat((mask, mask_pads), dim=1)
+
+        # create windows
+        inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
+        mask = mask.reshape(inputs.shape[0], -1, self.window_size)
+
+        batch_size, seq_len, window_size = inputs.shape
+
+        strides = inputs.reshape(-1, self.window_size) # collapse sequence length and batch size into one dimension for parallelization
+        window_mask = mask.reshape(-1, self.window_size).clone().detach()
+        window_mask[torch.all(window_mask, dim=-1)] = False
+        embeds = self.embed_layer(strides) # embed inputs
+        pos_embed = self.pos_embed(embeds) # sino pos embed
+        window_encoding = torch_max_no_pads(self.window_encoder(pos_embed, src_key_padding_mask=window_mask), window_mask) # take mean across window sequence
+        windows = window_encoding.reshape(batch_size, seq_len, -1) # re-insert the original sequence length dimension
+        local_output = self.local_proj(windows)
+        mask = torch.all(mask, dim=-1)
+
+        pos_embed = self.pos_embed(windows) # add positional again
+        encoding = torch_max_no_pads(self.global_encoder(pos_embed, src_key_padding_mask=mask), mask) # take mean across global sequence
+        global_output = self.global_proj(encoding) # project onto labels (raw logits)
+        return local_output, global_output
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embed_dim": self.embed_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size,
+            "window_size": self.window_size,
+            "stride": self.stride,
+            "montecarlo_layer": self.montecarlo_layer,
+            "nhead": self.nhead,
+            "max_length": self.max_length,
+            "num_layers": self.num_layers,
+            "pred_type" : self.pred_type
+        }
+        return save  
+    
+class GlobalLocalRoformer(nn.Module):
+    def __init__(self, 
+                    vocab_size : int,
+                    label_size : int,
+                    window_size=32,
+                    stride=32,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    nhead=8,
+                    max_length=512,
+                    num_layers=3,
+                    montecarlo_layer = False,
+                    pred_type = "multiclass"
+                    ):
+        super().__init__()
+
+        dropout = 0.1
+
+        self.embed_layer = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = PositionalEncoding(embed_size=embed_dim, max_len=max_length)
+        self.global_pos_embed = PositionalEncoding(embed_size=hidden_dim, max_len=max_length)
+
+        self.local_config = RoFormerConfig(
+            vocab_size = vocab_size,
+            embedding_size = embed_dim,
+            hidden_size = hidden_dim,
+            num_hidden_layers = num_layers,
+            num_attention_heads = nhead,
+            intermediate_size = hidden_dim,
+            hidden_dropout_prob = dropout,
+            attention_probs_dropout_prob = dropout,
+            max_position_embeddings = max_length,
+            type_vocab_size = 2,
+            rotary_value = False,
+        )
+
+        self.global_config = RoFormerConfig(
+            vocab_size = vocab_size,
+            embedding_size = hidden_dim,
+            hidden_size = hidden_dim,
+            num_hidden_layers = num_layers,
+            num_attention_heads = nhead,
+            intermediate_size = hidden_dim,
+            hidden_dropout_prob = dropout,
+            attention_probs_dropout_prob = dropout,
+            max_position_embeddings = max_length,
+            type_vocab_size = 2,
+            rotary_value = False,
+        )
+
+
+
+        # Local transformer for attending over windows
+        self.window_encoder = RoFormerModel(self.local_config)
+        self.window_size = window_size
+        self.stride = stride # as of now stride is not implemented
+
+        # global transformer for combining outputs of the local transformer
+        self.global_encoder = RoFormerModel(self.global_config)
+
+        # noise-aware labels layer or traditional linear projection
+        if montecarlo_layer:
+            self.global_proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+            self.local_proj = MCSoftmaxDenseFA(hidden_dim, label_size, 1, logits_only=True)
+        else:
+            self.global_proj = nn.Linear(embed_dim, label_size)
+            self.local_proj = nn.Linear(embed_dim, label_size)
+
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.max_length = math.floor(max_length // window_size)
+        self.label_size = label_size
+        self.montecarlo_layer = montecarlo_layer
+        self.num_layers = num_layers
+        self.pred_type = pred_type
+
+    def get_padding_mask(self, inputs):
+        mask = torch.sum(inputs,dim=-1) == 0
+        return mask
+
+    def forward(self, inputs, mask=None):
+
+        # truncate inputs if too long
+        inputs = inputs[:, :self.max_length]
+        mask = mask[:, :self.max_length]
+
+        if (inputs.shape[1] % self.window_size) != 0:
+            # determine how much padding is necessary to make all windows the same length
+            pad_size = self.window_size - (inputs.shape[1] % self.window_size)
+            pads = torch.zeros((inputs.shape[0], pad_size), device=inputs.device, dtype=torch.long)
+
+            # add padding to the input
+            inputs = torch.cat((inputs, pads), dim=1)
+
+        mask = ~mask
+        # mask = (inputs!=0).clone().detach()
+        # mask = (inputs == inputs)
+
+        # create windows
+        inputs = inputs.reshape(inputs.shape[0], -1, self.window_size)
+        mask = mask.reshape(inputs.shape[0], -1, self.window_size)
+
+        batch_size, seq_len, window_size = inputs.shape
+
+        strides = inputs.reshape(-1, self.window_size) # collapse sequence length and batch size into one dimension for parallelization
+        window_mask = mask.reshape(-1, self.window_size).clone().detach()
+        window_mask[~torch.any(window_mask, dim=-1)] = True        
+        embeds = self.embed_layer(strides) # embed inputs
+        # embeds = self.pos_embed(embeds)
+        window_encoding = torch_max_no_pads(self.window_encoder(inputs_embeds=embeds, encoder_attention_mask=window_mask).last_hidden_state, window_mask, flip=True) # take mean across window sequence
+        windows = window_encoding.reshape(batch_size, seq_len, -1) # re-insert the original sequence length dimension
+        local_output = self.local_proj(windows)
+        mask = torch.any(mask, dim=-1)
+
+        # windows = self.global_pos_embed(windows)
+        encoding = torch_max_no_pads(self.global_encoder(inputs_embeds=windows, encoder_attention_mask=mask).last_hidden_state, mask, flip=True) # take mean across global sequence
+        global_output = self.global_proj(encoding) # project onto labels (raw logits)
+        return local_output, global_output
+
+    def save_object(self):
+        save = {
+            "weights": self.state_dict(),
+            "vocab_size": self.vocab_size,
+            "embed_dim": self.embed_dim,
+            "hidden_dim": self.hidden_dim,
+            "label_size": self.label_size,
+            "window_size": self.window_size,
+            "stride": self.stride,
+            "montecarlo_layer": self.montecarlo_layer,
+            "nhead": self.nhead,
+            "max_length": self.max_length,
+            "num_layers": self.num_layers,
+            "pred_type": self.pred_type
+        }
+        return save  
+
 
 ######################################################################################
 
